@@ -1,5 +1,8 @@
+import datetime
+import pickle
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Lock
 from typing import List, Optional
 
@@ -30,8 +33,10 @@ class PerceptionNode:
     _points: Optional[np.ndarray]
     _lock: Lock
     _cache: Optional[FridgeEnvDetection]
+    _datetime: datetime.datetime
+    _save_msg: bool
 
-    def __init__(self):
+    def __init__(self, save_msg: bool = False, replay_datetime: Optional[str] = None):
         self.is_active = False
         self._mask = None
         self._points = None
@@ -40,14 +45,40 @@ class PerceptionNode:
         rospy.Subscriber(image_topic, Image, self.image_callback)
         rospy.Subscriber(point_cloud_topic, PointCloud2, self.point_cloud_callback)
 
+        self._cache = None
+        self._datetime = datetime.datetime.now()
+        self._save_msg = save_msg
+
         service_name = "/local/detic_segmentor/segment_image"
         rospy.wait_for_service(service_name)
         self._segment_image_fn = rospy.ServiceProxy(service_name, DeticSeg, persistent=True)
         self._lock = Lock()
 
+        if replay_datetime is not None:
+            self.is_active = True
+            self._save_msg = False
+            msg_log_path = Path(__file__).parent / "msg_log"
+            image_path = msg_log_path / f"image_rect_color-{replay_datetime}.pkl"
+            point_cloud_path = msg_log_path / f"point_cloud-{replay_datetime}.pkl"
+
+            with open(image_path, "rb") as f:
+                image_msg = pickle.load(f)
+            self.image_callback(image_msg)
+            with open(point_cloud_path, "rb") as f:
+                point_cloud_msg = pickle.load(f)
+            self.point_cloud_callback(point_cloud_msg)
+
     def image_callback(self, msg: Image):
         if not self.is_active or self._mask is not None:
             return
+
+        if self._save_msg:
+            name = f"image_rect_color-{self._datetime.strftime('%Y%m%d_%H%M%S')}.pkl"
+            rospy.loginfo(f"Saving image to {name}")
+            file_path = Path(__file__).parent / "msg_log" / name
+            with open(file_path, "wb") as f:
+                pickle.dump(msg, f)
+
         try:
             response: DeticSegResponse = self._segment_image_fn(msg)
         except rospy.ServiceException as e:
@@ -61,6 +92,14 @@ class PerceptionNode:
     def point_cloud_callback(self, msg: PointCloud2):
         if not self.is_active or self._points is not None:
             return
+
+        if self._save_msg:
+            name = f"point_cloud-{self._datetime.strftime('%Y%m%d_%H%M%S')}.pkl"
+            rospy.loginfo(f"Saving point cloud to {name}")
+            file_path = Path(__file__).parent / "msg_log" / name
+            with open(file_path, "wb") as f:
+                pickle.dump(msg, f)
+
         points = pointcloud2_to_xyz_array(msg, remove_nans=False).reshape(-1, 3)
         self._points = points
 
@@ -83,31 +122,26 @@ class PerceptionNode:
 
 if __name__ == "__main__":
     rospy.init_node("perception_node")
-    node = PerceptionNode()
-    node.is_active = True
+    mode = "replay"
+    node = PerceptionNode(save_msg=False, replay_datetime="20250326_082328")
 
-    visualize = True
+    time.sleep(3)
+    from skrobot.models import PR2
+    from skrobot.viewers import PyrenderViewer
 
-    if visualize:
-        time.sleep(3)
-        from skrobot.models import PR2
-        from skrobot.viewers import PyrenderViewer
+    pr2 = PR2()
+    pr2.angle_vector(AV_INIT)
 
-        pr2 = PR2()
-        pr2.angle_vector(AV_INIT)
+    v = PyrenderViewer()
+    v.add(pr2)
+    x, y, yaw, angle = node._cache.fridge_param
+    fridge = FridgeModel(angle)
+    fridge.translate([x, y, 0])
+    fridge.rotate(yaw, "z")
+    fridge.add(v)
+    for c in node._cache.cylinders:
+        v.add(c.to_visualizable())
+    v.show()
+    import time
 
-        v = PyrenderViewer()
-        v.add(pr2)
-        x, y, yaw, angle = node._cache.fridge_param
-        fridge = FridgeModel(angle)
-        fridge.translate([x, y, 0])
-        fridge.rotate(yaw, "z")
-        fridge.add(v)
-        for c in node._cache.cylinders:
-            v.add(c.to_visualizable())
-        v.show()
-        import time
-
-        time.sleep(1000)
-
-    rospy.spin()
+    time.sleep(1000)
