@@ -6,6 +6,7 @@ import sensor_msgs.point_cloud2 as pc2
 from jsk_recognition_msgs.msg import ClusterPointIndices
 from rpbench.articulated.world.jskfridge import FridgeModel
 from rpbench.articulated.world.utils import BoxSkeleton, CylinderSkelton
+from rpbench.planer_box_utils import Box2d, PlanerCoords
 from scipy.optimize import minimize
 from sensor_msgs.msg import PointCloud2
 from sklearn.cluster import DBSCAN
@@ -71,6 +72,9 @@ def model_content_in_fridge(
     fridge_model = instantiate_fridge_model(fridge_param)
     attention_region = fridge_model.regions[1].box.detach_clone()
     attention_region.translate(-POINTCLOUD_OFFSET)
+
+    co2d = PlanerCoords(attention_region.worldpos()[:2], fridge_param[2])
+    attention_region2d = Box2d(attention_region._extents[:2], co2d)
     z_lower = attention_region.worldpos()[2] - 0.5 * attention_region._extents[2]
 
     # Sometimes the points near the wall on the region is detected as a cluster.
@@ -122,6 +126,10 @@ def model_content_in_fridge(
                 r = r_max
             r_margin = 0.003
             p_center = np.array([x, y, z_lower + 0.5 * h])
+
+            if attention_region2d.sd(p_center[:2].reshape(1, 2))[0] > -(r + r_margin):
+                continue  # cylinder is not inside the region
+
             cylinder = CylinderSkelton(r + r_margin, h, p_center)
             cylinders.append(cylinder)
 
