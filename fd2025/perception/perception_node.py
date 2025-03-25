@@ -8,6 +8,7 @@ import rospy
 from cv_bridge import CvBridge
 from detic_ros.msg import SegmentationInfo
 from detic_ros.srv import DeticSeg, DeticSegResponse
+from rpbench.articulated.pr2.jskfridge import AV_INIT
 from rpbench.articulated.world.jskfridge import FridgeModel
 from rpbench.articulated.world.utils import CylinderSkelton
 from sensor_msgs.msg import Image, PointCloud2
@@ -89,9 +90,14 @@ if __name__ == "__main__":
 
     if visualize:
         time.sleep(3)
+        from skrobot.models import PR2
         from skrobot.viewers import PyrenderViewer
 
+        pr2 = PR2()
+        pr2.angle_vector(AV_INIT)
+
         v = PyrenderViewer()
+        v.add(pr2)
         x, y, yaw, angle = node._cache.fridge_param
         fridge = FridgeModel(angle)
         fridge.translate([x, y, 0])
