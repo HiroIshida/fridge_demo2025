@@ -15,6 +15,8 @@ from rpbench.articulated.pr2.jskfridge import AV_INIT
 from rpbench.articulated.world.jskfridge import FridgeModel
 from rpbench.articulated.world.utils import CylinderSkelton
 from sensor_msgs.msg import Image, PointCloud2
+from skrobot.models import PR2
+from skrobot.viewers import PyrenderViewer
 
 from fd2025.perception.detect_cylinders import model_content_in_fridge
 from fd2025.perception.detect_fridge import FridgeModelReconciler
@@ -25,6 +27,25 @@ from fd2025.ros_numpy.point_cloud2 import pointcloud2_to_xyz_array
 class FridgeEnvDetection:
     fridge_param: np.ndarray
     cylinders: List[CylinderSkelton]
+
+    def visualize(self, v: Optional[PyrenderViewer] = None) -> PyrenderViewer:
+        if v is None:
+            v = PyrenderViewer()
+        pr2 = PR2()
+        pr2.angle_vector(AV_INIT)
+        v.add(pr2)
+
+        # instantiate fridge
+        x, y, yaw, angle = self.fridge_param
+        fridge = FridgeModel(angle)
+        fridge.translate([x, y, 0])
+        fridge.rotate(yaw, "z")
+        fridge.add(v)
+
+        # instantiate cylinders
+        for c in self.cylinders:
+            v.add(c.to_visualizable())
+        return v
 
 
 class PerceptionNodeBase:
@@ -151,25 +172,7 @@ if __name__ == "__main__":
     # node = PerceptionNode(save_msg=True)
     # node = PerceptionNode(save_msg=False)
     node = PerceptionDebugNode(replay_datetime="20250326_082328")
-    node.percept()
-
-    time.sleep(3)
-    from skrobot.models import PR2
-    from skrobot.viewers import PyrenderViewer
-
-    pr2 = PR2()
-    pr2.angle_vector(AV_INIT)
-
-    v = PyrenderViewer()
-    v.add(pr2)
-    x, y, yaw, angle = node._cache.fridge_param
-    fridge = FridgeModel(angle)
-    fridge.translate([x, y, 0])
-    fridge.rotate(yaw, "z")
-    fridge.add(v)
-    for c in node._cache.cylinders:
-        v.add(c.to_visualizable())
+    detection = node.percept()
+    v = detection.visualize()
     v.show()
-    import time
-
     time.sleep(1000)
