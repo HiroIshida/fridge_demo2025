@@ -27,52 +27,20 @@ class FridgeEnvDetection:
     cylinders: List[CylinderSkelton]
 
 
-class PerceptionNode:
-    is_active: bool
+class PerceptionNodeBase:
+    _is_active: bool
+    _save_msg: bool
+    _datetime: Optional[datetime.datetime]
     _mask: Optional[np.ndarray]
     _points: Optional[np.ndarray]
-    _lock: Lock
     _cache: Optional[FridgeEnvDetection]
-    _datetime: datetime.datetime
-    _save_msg: bool
-
-    def __init__(self, save_msg: bool = False, replay_datetime: Optional[str] = None):
-        self.is_active = False
-        self._mask = None
-        self._points = None
-        image_topic = "/kinect_head/rgb/image_rect_color"
-        point_cloud_topic = "/local/tf_transform/output"
-        rospy.Subscriber(image_topic, Image, self.image_callback)
-        rospy.Subscriber(point_cloud_topic, PointCloud2, self.point_cloud_callback)
-
-        self._cache = None
-        self._datetime = datetime.datetime.now()
-        self._save_msg = save_msg
-
-        service_name = "/local/detic_segmentor/segment_image"
-        rospy.wait_for_service(service_name)
-        self._segment_image_fn = rospy.ServiceProxy(service_name, DeticSeg, persistent=True)
-        self._lock = Lock()
-
-        if replay_datetime is not None:
-            self.is_active = True
-            self._save_msg = False
-            msg_log_path = Path(__file__).parent / "msg_log"
-            image_path = msg_log_path / f"image_rect_color-{replay_datetime}.pkl"
-            point_cloud_path = msg_log_path / f"point_cloud-{replay_datetime}.pkl"
-
-            with open(image_path, "rb") as f:
-                image_msg = pickle.load(f)
-            self.image_callback(image_msg)
-            with open(point_cloud_path, "rb") as f:
-                point_cloud_msg = pickle.load(f)
-            self.point_cloud_callback(point_cloud_msg)
 
     def image_callback(self, msg: Image):
-        if not self.is_active or self._mask is not None:
+        if not self._is_active or self._mask is not None:
             return
 
         if self._save_msg:
+            assert self._datetime is not None
             name = f"image_rect_color-{self._datetime.strftime('%Y%m%d_%H%M%S')}.pkl"
             rospy.loginfo(f"Saving image to {name}")
             file_path = Path(__file__).parent / "msg_log" / name
@@ -90,10 +58,11 @@ class PerceptionNode:
             self._check_and_process_data()
 
     def point_cloud_callback(self, msg: PointCloud2):
-        if not self.is_active or self._points is not None:
+        if not self._is_active or self._points is not None:
             return
 
         if self._save_msg:
+            assert self._datetime is not None
             name = f"point_cloud-{self._datetime.strftime('%Y%m%d_%H%M%S')}.pkl"
             rospy.loginfo(f"Saving point cloud to {name}")
             file_path = Path(__file__).parent / "msg_log" / name
@@ -117,13 +86,44 @@ class PerceptionNode:
         self._cache = FridgeEnvDetection(fridge_param, cylinders)
         self._mask = None
         self._points = None
-        self.is_active = False
+        self._is_active = False
+
+
+class PerceptionNode(PerceptionNodeBase):
+    _lock: Lock
+
+    def __init__(self, save_msg: bool = False):
+        self._is_active = False
+        self._mask = None
+        self._points = None
+        image_topic = "/kinect_head/rgb/image_rect_color"
+        point_cloud_topic = "/local/tf_transform/output"
+        rospy.Subscriber(image_topic, Image, self.image_callback)
+        rospy.Subscriber(point_cloud_topic, PointCloud2, self.point_cloud_callback)
+
+        self._cache = None
+        self._datetime = datetime.datetime.now()
+        self._save_msg = save_msg
+
+        service_name = "/local/detic_segmentor/segment_image"
+        rospy.wait_for_service(service_name)
+        self._segment_image_fn = rospy.ServiceProxy(service_name, DeticSeg, persistent=True)
+        self._lock = Lock()
+
+    def percept(self) -> FridgeEnvDetection:
+        self._cache = None
+        self._is_active = True
+        while self._cache is None:
+            time.sleep(0.02)
+        return self._cache
 
 
 if __name__ == "__main__":
     rospy.init_node("perception_node")
-    mode = "replay"
-    node = PerceptionNode(save_msg=False, replay_datetime="20250326_082328")
+    # node = PerceptionNode(save_msg=False, replay_datetime="20250326_082328")
+    # node = PerceptionNode(save_msg=True)
+    node = PerceptionNode(save_msg=False)
+    node._is_active = True
 
     time.sleep(3)
     from skrobot.models import PR2
