@@ -10,7 +10,7 @@ from hifuku.core import SolutionLibrary
 from hifuku.domain import JSKFridge
 from hifuku.script_utils import load_library
 from plainmp.ompl_solver import OMPLSolver, OMPLSolverConfig
-from rpbench.articulated.pr2.jskfridge import JskFridgeVerticalReachingTask
+from rpbench.articulated.pr2.jskfridge import JskFridgeReachingTask
 from rpbench.articulated.vision import create_heightmap_z_slice
 from rpbench.articulated.world.jskfridge import get_fridge_model
 from rpbench.articulated.world.utils import CylinderSkelton
@@ -53,9 +53,7 @@ def create_task_param(detection: FridgeEnvDetection, target_coords: Coordinates)
     tf_fridge_to_region = Transform2d(-target_region.box.worldpos()[:2], 0)
     tf_robot_to_region = tf_robot_to_fridge * tf_fridge_to_region
 
-    task_param = np.zeros(
-        1 + JskFridgeVerticalReachingTask.get_world_type().N_MAX_OBSTACLES * 4 + 7
-    )
+    task_param = np.zeros(1 + JskFridgeReachingTask.get_world_type().N_MAX_OBSTACLES * 4 + 7)
     head = 0
     task_param[0] = len(detection.cylinders)
     head += 1
@@ -67,7 +65,7 @@ def create_task_param(detection: FridgeEnvDetection, target_coords: Coordinates)
         task_param[head + 2] = cylinder.height
         task_param[head + 3] = cylinder.radius
         head += 4
-    head = JskFridgeVerticalReachingTask.get_world_type().N_MAX_OBSTACLES * 4 + 1
+    head = JskFridgeReachingTask.get_world_type().N_MAX_OBSTACLES * 4 + 1
 
     # target position
     target_pos = target_coords.worldpos()
@@ -188,10 +186,10 @@ class TampSolver:
         self._checker = FeasibilityCheckerBatchImageJit(20)
 
     def solve(self, task_param: np.ndarray):
-        task_init = JskFridgeVerticalReachingTask.from_task_param(task_param)
+        task_init = JskFridgeReachingTask.from_task_param(task_param)
         self._hypothetical_check(task_init)
 
-    def _hypothetical_check(self, task: JskFridgeVerticalReachingTask) -> bool:
+    def _hypothetical_check(self, task: JskFridgeReachingTask) -> bool:
         region = get_fridge_model().regions[task.world.attention_region_index]
         obstacles = task.world.get_obstacle_list()
         n_obs = len(obstacles)
@@ -201,9 +199,9 @@ class TampSolver:
                 lst = list(comb)
                 hmap = create_heightmap_z_slice(region.box, lst, 112)
                 hmap_list.append(hmap)
-        feasibilities, _ = self._checker.infer(task.description, hmap_list)
+        feasibilities, libtraj_idx = self._checker.infer(task.description, hmap_list)
 
-    def is_feasible(self, task: JskFridgeVerticalReachingTask) -> bool:
+    def is_feasible(self, task: JskFridgeReachingTask) -> bool:
         problem = task.export_problem()
         conf = OMPLSolverConfig(n_max_call=1000000, timeout=0.1, n_max_ik_trial=1000)
         solver = OMPLSolver(conf)
@@ -229,7 +227,7 @@ if __name__ == "__main__":
     debug = False
     if debug:
         v = detection.visualize()
-        task = JskFridgeVerticalReachingTask.from_task_param(task_param)
+        task = JskFridgeReachingTask.from_task_param(task_param)
         # ret = task.solve_default()
 
         from rpbench.articulated.pr2.jskfridge import AV_INIT
