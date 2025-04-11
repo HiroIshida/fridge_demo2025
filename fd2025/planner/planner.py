@@ -1,5 +1,5 @@
+import copy
 from dataclasses import dataclass
-from itertools import combinations
 from typing import List, Optional
 
 import numpy as np
@@ -10,9 +10,10 @@ from hifuku.core import SolutionLibrary
 from hifuku.domain import JSKFridge
 from hifuku.script_utils import load_library
 from plainmp.ompl_solver import OMPLSolver, OMPLSolverConfig
-from rpbench.articulated.pr2.jskfridge import JskFridgeReachingTask
+from plainmp.psdf import CylinderSDF, Pose
+from rpbench.articulated.pr2.jskfridge import JskFridgeReachingTask, larm_reach_clf
 from rpbench.articulated.vision import create_heightmap_z_slice
-from rpbench.articulated.world.jskfridge import get_fridge_model
+from rpbench.articulated.world.jskfridge import get_fridge_model, get_fridge_model_sdf
 from rpbench.articulated.world.utils import CylinderSkelton
 from skrobot.coordinates import Coordinates, rpy_angle
 from skrobot.model.primitives import Axis
@@ -160,7 +161,7 @@ class FeasibilityCheckerBatchImageJit:
 
         # warm up
         vector = np.random.randn(7).astype(np.float32)
-        hmaps = [np.random.randn(112, 112).astype(np.float32) for _ in range(10)]
+        hmaps = [np.random.randn(112, 112).astype(np.float32) for _ in range(n_batch)]
         for _ in range(10):
             self.infer(vector, hmaps)
 
@@ -180,26 +181,165 @@ class FeasibilityCheckerBatchImageJit:
             min_indices.cpu().detach().numpy(),
         )
 
+    def infer_single(self, vector: np.ndarray, mat: np.ndarray):
+        feasibilities, libtraj_idx = self.infer(vector, [mat])
+        return feasibilities[0], libtraj_idx[0]
+
 
 class TampSolver:
     def __init__(self):
-        self._checker = FeasibilityCheckerBatchImageJit(20)
+        self._checker = FeasibilityCheckerBatchImageJit(30)
+        self._checker_single = FeasibilityCheckerBatchImageJit(1)  # for non-batch inference
 
     def solve(self, task_param: np.ndarray):
         task_init = JskFridgeReachingTask.from_task_param(task_param)
-        self._hypothetical_check(task_init)
 
-    def _hypothetical_check(self, task: JskFridgeReachingTask) -> bool:
+        target_pose, base_pose = task_init.description[:4], task_init.description[4:7]
+        larm_reach_clf.set_base_pose(base_pose)
+        target_pose_xyzrpy = np.hstack([target_pose[:3], 0.0, 0.0, target_pose[3]])
+        if not larm_reach_clf.predict(target_pose_xyzrpy):
+            return None
+
+        # check if solvable without any replacement
+        co = Coordinates(task_init.description[:3])
+        co.rotate(task_init.description[3], "z")
+        obstacle_list = task_init.world.get_obstacle_list()
+        if self.is_valid_target_pose(co, obstacle_list, is_grasping=False):
+            print("valid target pose without any replacement")
+            region = get_fridge_model().regions[task_init.world.attention_region_index]
+            hmap_now = create_heightmap_z_slice(region.box, obstacle_list, 112)
+            is_est_feasible, _ = self._checker_single.infer_single(task_init.description, hmap_now)
+            if is_est_feasible:
+                print("solvable without any replacement")
+                return task_init
+
+        return self._hypothetical_obstacle_delete_check(task_init)
+
+    def _hypothetical_obstacle_delete_check(self, task: JskFridgeReachingTask) -> bool:
+
         region = get_fridge_model().regions[task.world.attention_region_index]
         obstacles = task.world.get_obstacle_list()
+
+        # consider removing single obstacle
+        for i in range(len(obstacles)):
+            indices_remain = list(set(range(len(obstacles))) - {i})
+            lst_remain = [obstacles[i] for i in indices_remain]
+            hmap = create_heightmap_z_slice(region.box, lst_remain, 112)
+            is_est_feasible, _ = self._checker_single.infer_single(task.description, hmap)
+            if is_est_feasible:
+                return self._hypothetical_obstacle_replace_check(
+                    task.description, obstacles, indices_remain
+                )
+        return None
+
+    def _hypothetical_obstacle_replace_check(
+        self, description: np.ndarray, obstacles: List[CylinderSkelton], indices_remain: List[int]
+    ):
         n_obs = len(obstacles)
-        hmap_list = []
-        for n in range(n_obs, 0, -1):
-            for comb in combinations(obstacles, n):
-                lst = list(comb)
-                hmap = create_heightmap_z_slice(region.box, lst, 112)
-                hmap_list.append(hmap)
-        feasibilities, libtraj_idx = self._checker.infer(task.description, hmap_list)
+        indices_move = list(set(range(n_obs)) - set(indices_remain))
+        assert len(indices_move) == 1  # TODO: support multiple
+        obstacles = copy.deepcopy(obstacles)
+        obstacle_remove = obstacles[indices_move[0]]
+        radius = obstacle_remove.radius
+
+        region = get_fridge_model().regions[1]
+        center2d = region.box.worldpos()[:2]
+        lb = center2d - 0.5 * region.box.extents[:2] + radius
+        ub = center2d + 0.5 * region.box.extents[:2] - radius
+
+        other_obstacles_pos = np.array([obstacles[i].worldpos()[:2] for i in indices_remain])
+        other_obstacles_radius = np.array([obstacles[i].radius for i in indices_remain])
+
+        pos2d_cands = np.zeros((30, 2))
+        pos3d = obstacle_remove.worldpos()
+
+        target_pose = description[:4]
+        x, y, z, yaw = target_pose
+        target_co = Coordinates([x, y, z])
+        target_co.rotate(yaw, "z")
+
+        valid_count = 0
+        max_attempts = 1000
+        attempts = 0
+
+        while valid_count < 30 and attempts < max_attempts:
+            pos2d = np.random.uniform(lb, ub, 2)
+            print(f"checking {pos2d}...")
+
+            # if other obstacles exist, check collision
+            if other_obstacles_pos.size > 0:
+                distances = np.linalg.norm(other_obstacles_pos - pos2d, axis=1)
+                min_distances = distances - other_obstacles_radius - radius
+                is_any_collision = np.any(min_distances < 0)
+                if is_any_collision:
+                    print(f"collision: {pos2d}")
+                    attempts += 1
+                    continue
+
+            # new obstalce configuration
+            new_obs_co = Coordinates(np.hstack([pos2d, pos3d[2]]))
+            obstacles[indices_move[0]].newcoords(new_obs_co)
+            if not self.is_valid_target_pose(target_co, obstacles, is_grasping=False):
+                print(f"invalid target pose: {pos2d}")
+                attempts += 1
+                continue
+
+            pos2d_cands[valid_count] = pos2d
+            valid_count += 1
+            attempts += 1
+
+        if valid_count < 30:
+            print("no feasible pose found")
+            return None
+
+        # Calculate distances from original position and sort candidates
+        original_pos2d = pos3d[:2]
+        distances = np.linalg.norm(pos2d_cands[:valid_count] - original_pos2d, axis=1)
+        sorted_indices = np.argsort(distances)
+        sorted_pos2d_cands = pos2d_cands[sorted_indices]
+
+        # Create heightmaps for sorted candidates
+        hmap_lst = []
+        obstacle_positions = []  # Store positions for each candidate
+        for pos2d in sorted_pos2d_cands:
+            pos3d_new = pos3d.copy()
+            pos3d_new[:2] = pos2d
+            obstacle_remove.newcoords(Coordinates(pos3d_new))
+            hmap = create_heightmap_z_slice(region.box, obstacles, 112)
+            hmap_lst.append(hmap)
+            obstacle_positions.append(pos3d_new.copy())  # Save the position
+
+        fs, _ = self._checker.infer(description, hmap_lst)
+        print(fs)
+
+        for i, feasible in enumerate(fs):
+            if feasible:
+                pos3d_new = obstacle_positions[i]
+                print("結果発表!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+                print(f"original: {pos3d}")
+                print(f"selected: {pos3d_new}")
+                obstacle_remove.newcoords(Coordinates(pos3d_new))
+                world_type = JskFridgeReachingTask.get_world_type()
+                obstacles_param = np.zeros(world_type.N_MAX_OBSTACLES * 4)
+
+                for j, obs in enumerate(obstacles):
+                    pos = obs.worldpos()
+                    region_pos = region.box.worldpos()
+                    H_region = region.box.extents[2]
+
+                    pos_relative = pos - region_pos
+                    pos_relative[2] += 0.5 * H_region - 0.5 * obs.height
+
+                    idx = j * 4
+                    obstacles_param[idx : idx + 2] = pos_relative[:2]  # x, y
+                    obstacles_param[idx + 2] = obs.height  # height
+                    obstacles_param[idx + 3] = obs.radius  # radius
+
+                world = world_type(obstacles_param[: n_obs * 4])
+                task = JskFridgeReachingTask(world, description.copy())
+                return task
+
+        return None
 
     def is_feasible(self, task: JskFridgeReachingTask) -> bool:
         problem = task.export_problem()
@@ -208,27 +348,55 @@ class TampSolver:
         ret = solver.solve(problem)
         return ret.traj is None
 
+    def is_valid_target_pose(
+        self, co: Coordinates, obstacles: List[CylinderSkelton], *, is_grasping: bool
+    ) -> bool:
+        assert not is_grasping, "currently not supported"
+        sdf = get_fridge_model_sdf()
+        for obs in obstacles:
+            cylinder_sdf = CylinderSDF(obs.radius, obs.height, Pose(obs.worldpos()))
+            sdf.add(cylinder_sdf)
+
+        if sdf.evaluate(co.worldpos()) < 0.03:
+            return False
+        print(f"co distance: {sdf.evaluate(co.worldpos())}")
+        co_dummy = co.copy_worldcoords()
+        co_dummy.translate([-0.07, 0.0, 0.0])
+        print(f"dummy distance: {sdf.evaluate(co_dummy.worldpos())}")
+
+        if sdf.evaluate(co_dummy.worldpos()) < 0.04:
+            return False
+        co_dummy.translate([-0.07, 0.0, 0.0])
+        print(f"dummy distance2: {sdf.evaluate(co_dummy.worldpos())}")
+        if sdf.evaluate(co_dummy.worldpos()) < 0.04:
+            return False
+        # << ALMOST COPIED FROM JSKFRIDGE
+        return True
+
 
 if __name__ == "__main__":
     node = PerceptionDebugNode("20250326_082328")
     detection = node.percept()
+    detection.cylinders = [detection.cylinders[2]]
+    # detection.cylinders = []
+
     ax = Axis()
     ax.translate([0.3, -0.1, 1.05])  # easy
+    print(detection)
     task_param = create_task_param(detection, ax.copy_worldcoords())
+    print(task_param)
+    task = JskFridgeReachingTask.from_task_param(task_param)
     solver = TampSolver()
-    from pyinstrument import Profiler
+    task = solver.solve(task_param)
+    assert isinstance(task, JskFridgeReachingTask)
+    # print(task.to_task_param())
 
-    profiler = Profiler()
-    profiler.start()
-    solver.solve(task_param)
-    profiler.stop()
-    print(profiler.output_text(unicode=True, color=True, show_all=False))
-
-    debug = False
+    debug = True
     if debug:
         v = detection.visualize()
-        task = JskFridgeReachingTask.from_task_param(task_param)
-        # ret = task.solve_default()
+        # task = JskFridgeReachingTask.from_task_param(task_param)
+        ret = task.solve_default()
+        print(ret)
 
         from rpbench.articulated.pr2.jskfridge import AV_INIT
         from skrobot.models import PR2
