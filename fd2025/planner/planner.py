@@ -9,7 +9,7 @@ from hifuku.batch_network import BatchFCN
 from hifuku.core import SolutionLibrary
 from hifuku.domain import JSKFridge
 from hifuku.script_utils import load_library
-from plainmp.ompl_solver import OMPLSolver, OMPLSolverConfig, set_random_seed
+from plainmp.ompl_solver import OMPLSolver, set_random_seed
 from plainmp.psdf import CylinderSDF, Pose
 from rpbench.articulated.pr2.jskfridge import JskFridgeReachingTask, larm_reach_clf
 from rpbench.articulated.vision import create_heightmap_z_slice
@@ -321,21 +321,7 @@ class TampSolver:
                 pos3d_new = obstacle_positions[i]
                 obstacle_remove.newcoords(Coordinates(pos3d_new))
                 world_type = JskFridgeReachingTask.get_world_type()
-                obstacles_param = np.zeros(world_type.N_MAX_OBSTACLES * 4)
-
-                for j, obs in enumerate(obstacles):
-                    pos = obs.worldpos()
-                    region_pos = region.box.worldpos()
-                    H_region = region.box.extents[2]
-
-                    pos_relative = pos - region_pos
-                    pos_relative[2] += 0.5 * H_region - 0.5 * obs.height
-
-                    idx = j * 4
-                    obstacles_param[idx : idx + 2] = pos_relative[:2]  # x, y
-                    obstacles_param[idx + 2] = obs.height  # height
-                    obstacles_param[idx + 3] = obs.radius  # radius
-
+                obstacles_param = self.obstacles_to_obstacles_param(obstacles, region.box)
                 world = world_type(obstacles_param[: n_obs * 4])
                 task = JskFridgeReachingTask(world, description.copy())
                 problem = task.export_problem()
@@ -348,15 +334,29 @@ class TampSolver:
 
         return None
 
-    def is_feasible(self, task: JskFridgeReachingTask) -> bool:
-        problem = task.export_problem()
-        conf = OMPLSolverConfig(n_max_call=1000000, timeout=0.1, n_max_ik_trial=1000)
-        solver = OMPLSolver(conf)
-        ret = solver.solve(problem)
-        return ret.traj is None
+    @staticmethod
+    def obstacles_to_obstacles_param(obstacles: List[CylinderSkelton], region_box) -> np.ndarray:
+        world_type = JskFridgeReachingTask.get_world_type()
+        obstacles_param = np.zeros(world_type.N_MAX_OBSTACLES * 4)
 
+        for j, obs in enumerate(obstacles):
+            pos = obs.worldpos()
+            region_pos = region_box.worldpos()
+            H_region = region_box.extents[2]
+
+            pos_relative = pos - region_pos
+            pos_relative[2] += 0.5 * H_region - 0.5 * obs.height
+
+            idx = j * 4
+            obstacles_param[idx : idx + 2] = pos_relative[:2]  # x, y
+            obstacles_param[idx + 2] = obs.height  # height
+            obstacles_param[idx + 3] = obs.radius  # radius
+
+        return obstacles_param
+
+    @staticmethod
     def is_valid_target_pose(
-        self, co: Coordinates, obstacles: List[CylinderSkelton], *, is_grasping: bool
+        co: Coordinates, obstacles: List[CylinderSkelton], *, is_grasping: bool
     ) -> bool:
         assert not is_grasping, "currently not supported"
         sdf = get_fridge_model_sdf()
