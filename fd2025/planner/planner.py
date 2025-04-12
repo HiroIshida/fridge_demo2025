@@ -232,22 +232,36 @@ class TampSolver:
             hmap = create_heightmap_z_slice(region.box, lst_remain, 112)
             is_est_feasible, _ = self._checker_single.infer_single(task.description, hmap)
             if is_est_feasible:
-                return self._hypothetical_obstacle_replace_check(
-                    task.description, obstacles, indices_remain
-                )
+                return self._plan_obstacle_relocation(task.description, obstacles, indices_remain)
         return None
 
-    def _hypothetical_obstacle_replace_check(
+    def _plan_obstacle_relocation(
         self, description: np.ndarray, obstacles: List[CylinderSkelton], indices_remain: List[int]
     ):
         n_obs = len(obstacles)
         indices_move = list(set(range(n_obs)) - set(indices_remain))
         assert len(indices_move) == 1  # TODO: support multiple
         obstacles = copy.deepcopy(obstacles)
-        obstacle_remove = obstacles[indices_move[0]]
+        remove_idx = indices_move[0]
+        obstacle_remove = obstacles[remove_idx]
         radius = obstacle_remove.radius
-
         region = get_fridge_model().regions[1]
+
+        # determine where to grasp
+        cand_pregrasp_pose_list = self._sample_possible_pre_grasp_pose(
+            remove_idx, obstacles, num_cand_target=10
+        )
+        if len(cand_pregrasp_pose_list) == 0:
+            return None
+        hmap_current = create_heightmap_z_slice(region.box, obstacles, 112)
+        for pregrasp_pose in cand_pregrasp_pose_list:
+            description_tweak = description.copy()
+            description_tweak[:4] = pregrasp_pose
+            feasible, _ = self._checker_single.infer_single(description_tweak, hmap_current)
+            print(feasible)
+        assert False, "I'm working on here!!!!!!!!!!!!!!!"
+
+        # determine relocation target
         center2d = region.box.worldpos()[:2]
         lb = center2d - 0.5 * region.box.extents[:2] + radius
         ub = center2d + 0.5 * region.box.extents[:2] - radius
@@ -334,6 +348,48 @@ class TampSolver:
 
         return None
 
+    def _sample_possible_pre_grasp_pose(
+        self, i_pick: int, obstacles: List[CylinderSkelton], num_cand_target: int = 10
+    ) -> List[np.ndarray]:  # array of [x, y, z, yaw]:
+        # ============================================================
+        # >> DEPEND ON rpbench JSKFridgeTaskBase.sample_pose() method!!
+        region = get_fridge_model().regions[1]
+        center = region.box.worldpos()[:2]
+        D, W, H = region.box.extents
+        horizontal_margin = 0.08
+        depth_margin = 0.03
+        width_effective = np.array([D - 2 * depth_margin, W - 2 * horizontal_margin])
+        center = region.box.worldpos()[:2]
+        lb = center - 0.5 * width_effective
+        ub = center + 0.5 * width_effective
+        z = 1.07  # the value is fixed for task (check by actually sample task!)
+
+        obstacle = obstacles[i_pick]
+        co_baseline = obstacle.copy_worldcoords()
+        z_offset = z - obstacle.worldpos()[2]
+        co_baseline.translate([0.0, 0.0, z_offset])
+        n_max_iter = num_cand_target * 5
+        cands = []
+        for _ in range(n_max_iter):
+            co_cand = co_baseline.copy_worldcoords()
+            pos = co_cand.worldpos()
+            if np.any(pos[:2] < lb) or np.any(pos[:2] > ub):
+                continue
+            yaw = np.random.uniform(-0.25 * np.pi, 0.25 * np.pi)
+            co_cand.rotate(yaw, "z")
+            co_cand.translate([-0.06, 0.0, 0.0])
+            is_reachable = larm_reach_clf.predict(
+                co_cand
+            )  # assuming that base pose is already set in solve()
+            if is_reachable:
+                if self.is_valid_target_pose(co_cand, obstacles, is_grasping=False):
+                    cands.append(np.hstack([co_cand.worldpos(), yaw]))
+                    if len(cands) == num_cand_target:
+                        break
+        # << DEPEND ON rpbench JSKFridgeTaskBase.sample_pose() method!!
+        # ============================================================
+        return cands
+
     @staticmethod
     def obstacles_to_obstacles_param(obstacles: List[CylinderSkelton], region_box) -> np.ndarray:
         world_type = JskFridgeReachingTask.get_world_type()
@@ -364,6 +420,8 @@ class TampSolver:
             cylinder_sdf = CylinderSDF(obs.radius, obs.height, Pose(obs.worldpos()))
             sdf.add(cylinder_sdf)
 
+        # ============================================================
+        # >> DEPEND ON rpbench JSKFridgeTaskBase.sample_pose() method!!
         if sdf.evaluate(co.worldpos()) < 0.03:
             return False
         co_dummy = co.copy_worldcoords()
@@ -374,7 +432,8 @@ class TampSolver:
         co_dummy.translate([-0.07, 0.0, 0.0])
         if sdf.evaluate(co_dummy.worldpos()) < 0.04:
             return False
-        # << ALMOST COPIED FROM JSKFRIDGE
+        # << DEPEND ON rpbench JSKFridgeTaskBase.sample_pose() method!!
+        # ============================================================
         return True
 
 
