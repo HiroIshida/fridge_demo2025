@@ -110,10 +110,9 @@ class Node:
 
 
 class FeasibilityCheckerBatchImageJit:
-    ae_modeL_shared: torch.jit.ScriptModule
+    ae_model_shared: torch.jit.ScriptModule
 
-    def __init__(self, n_batch: int):
-        lib: SolutionLibrary = load_library(JSKFridge, "cuda", postfix="0.2")
+    def __init__(self, lib: SolutionLibrary, n_batch: int):
         self.dummy_encoded = torch.zeros(n_batch, 200).float().cuda()
         self.biases = torch.tensor(lib.biases).float().cuda()
         self.max_admissible_cost = lib.max_admissible_cost
@@ -188,8 +187,14 @@ class FeasibilityCheckerBatchImageJit:
 
 class TampSolver:
     def __init__(self):
-        self._checker = FeasibilityCheckerBatchImageJit(30)
-        self._checker_single = FeasibilityCheckerBatchImageJit(1)  # for non-batch inference
+        self._lib = load_library(JSKFridge, "cuda", postfix="0.2")
+        conf = copy.deepcopy(JSKFridge.solver_config)
+        conf.n_max_call *= 2  # ensure enough time
+        self._mp_solver = OMPLSolver(conf)
+        self._checker = FeasibilityCheckerBatchImageJit(self._lib, 30)
+        self._checker_single = FeasibilityCheckerBatchImageJit(
+            self._lib, 1
+        )  # for non-batch inference
 
     def solve(self, task_param: np.ndarray):
         task_init = JskFridgeReachingTask.from_task_param(task_param)
@@ -309,15 +314,11 @@ class TampSolver:
             hmap_lst.append(hmap)
             obstacle_positions.append(pos3d_new.copy())  # Save the position
 
-        fs, _ = self._checker.infer(description, hmap_lst)
-        print(fs)
+        fs, indices = self._checker.infer(description, hmap_lst)
 
-        for i, feasible in enumerate(fs):
+        for i, (feasible, experience_idx) in enumerate(zip(fs, indices)):
             if feasible:
                 pos3d_new = obstacle_positions[i]
-                print("結果発表!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-                print(f"original: {pos3d}")
-                print(f"selected: {pos3d_new}")
                 obstacle_remove.newcoords(Coordinates(pos3d_new))
                 world_type = JskFridgeReachingTask.get_world_type()
                 obstacles_param = np.zeros(world_type.N_MAX_OBSTACLES * 4)
@@ -337,6 +338,12 @@ class TampSolver:
 
                 world = world_type(obstacles_param[: n_obs * 4])
                 task = JskFridgeReachingTask(world, description.copy())
+                problem = task.export_problem()
+                ret = self._mp_solver.solve(problem, self._lib.init_solutions[experience_idx])
+                if ret.traj is None:
+                    print("not feasible")
+                    continue
+                print("solved!!!")
                 return task
 
         return None
@@ -387,7 +394,13 @@ if __name__ == "__main__":
     print(task_param)
     task = JskFridgeReachingTask.from_task_param(task_param)
     solver = TampSolver()
+    from pyinstrument import Profiler
+
+    profiler = Profiler()
+    profiler.start()
     task = solver.solve(task_param)
+    profiler.stop()
+    print(profiler.output_text(unicode=True, color=True, show_all=False))
     assert isinstance(task, JskFridgeReachingTask)
     # print(task.to_task_param())
 
