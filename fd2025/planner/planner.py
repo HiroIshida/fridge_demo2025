@@ -1,6 +1,6 @@
 import copy
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 import numpy as np
 import torch
@@ -11,6 +11,7 @@ from hifuku.domain import JSKFridge
 from hifuku.script_utils import load_library
 from plainmp.ompl_solver import OMPLSolver, set_random_seed
 from plainmp.psdf import CylinderSDF, Pose
+from plainmp.robot_spec import PR2LarmSpec
 from rpbench.articulated.pr2.jskfridge import JskFridgeReachingTask, larm_reach_clf
 from rpbench.articulated.vision import create_heightmap_z_slice
 from rpbench.articulated.world.jskfridge import get_fridge_model, get_fridge_model_sdf
@@ -247,19 +248,29 @@ class TampSolver:
         radius = obstacle_remove.radius
         region = get_fridge_model().regions[1]
 
-        # determine where to grasp
-        cand_pregrasp_pose_list = self._sample_possible_pre_grasp_pose(
-            remove_idx, obstacles, num_cand_target=10
-        )
-        if len(cand_pregrasp_pose_list) == 0:
-            return None
+        # find reacable pregrasp pose
+        pregrasp_pose = None
+        traj_to_pregrasp = None
         hmap_current = create_heightmap_z_slice(region.box, obstacles, 112)
-        for pregrasp_pose in cand_pregrasp_pose_list:
+        for pregrasp_pose_cand in self._sample_possible_pre_grasp_pose(remove_idx, obstacles):
             description_tweak = description.copy()
-            description_tweak[:4] = pregrasp_pose
-            feasible, _ = self._checker_single.infer_single(description_tweak, hmap_current)
-            print(feasible)
-        assert False, "I'm working on here!!!!!!!!!!!!!!!"
+            description_tweak[:4] = pregrasp_pose_cand
+            feasible, traj_idx = self._checker_single.infer_single(description_tweak, hmap_current)
+            if feasible:
+                obstacles_param = self.obstacles_to_obstacles_param(obstacles, region.box)
+                world = JskFridgeReachingTask.get_world_type()(obstacles_param[: n_obs * 4])
+                task = JskFridgeReachingTask(world, description_tweak)
+                problem = task.export_problem()
+                ret = self._mp_solver.solve(problem, self._lib.init_solutions[traj_idx])
+                if ret.traj is not None:
+                    pregrasp_pose = pregrasp_pose_cand
+                    traj_to_pregrasp = ret.traj
+                    print("found reachable pregrasp pose")
+                    break
+        if pregrasp_pose is None:
+            print("no feasible pregrasp pose")
+            return None
+        self._traj_to_pregrasp = traj_to_pregrasp  # for debug
 
         # determine relocation target
         center2d = region.box.worldpos()[:2]
@@ -349,8 +360,8 @@ class TampSolver:
         return None
 
     def _sample_possible_pre_grasp_pose(
-        self, i_pick: int, obstacles: List[CylinderSkelton], num_cand_target: int = 10
-    ) -> List[np.ndarray]:  # array of [x, y, z, yaw]:
+        self, i_pick: int, obstacles: List[CylinderSkelton]
+    ) -> Iterator[np.ndarray]:
         # ============================================================
         # >> DEPEND ON rpbench JSKFridgeTaskBase.sample_pose() method!!
         region = get_fridge_model().regions[1]
@@ -368,8 +379,7 @@ class TampSolver:
         co_baseline = obstacle.copy_worldcoords()
         z_offset = z - obstacle.worldpos()[2]
         co_baseline.translate([0.0, 0.0, z_offset])
-        n_max_iter = num_cand_target * 5
-        cands = []
+        n_max_iter = 10
         for _ in range(n_max_iter):
             co_cand = co_baseline.copy_worldcoords()
             pos = co_cand.worldpos()
@@ -383,12 +393,9 @@ class TampSolver:
             )  # assuming that base pose is already set in solve()
             if is_reachable:
                 if self.is_valid_target_pose(co_cand, obstacles, is_grasping=False):
-                    cands.append(np.hstack([co_cand.worldpos(), yaw]))
-                    if len(cands) == num_cand_target:
-                        break
+                    yield np.hstack([co_cand.worldpos(), yaw])
         # << DEPEND ON rpbench JSKFridgeTaskBase.sample_pose() method!!
         # ============================================================
-        return cands
 
     @staticmethod
     def obstacles_to_obstacles_param(obstacles: List[CylinderSkelton], region_box) -> np.ndarray:
@@ -470,9 +477,9 @@ if __name__ == "__main__":
     debug = True
     if debug:
         v = detection.visualize()
-        # task = JskFridgeReachingTask.from_task_param(task_param)
-        ret = task.solve_default()
-        print(ret)
+        task = JskFridgeReachingTask.from_task_param(task_param)
+        # ret = task.solve_default()
+        # print(ret)
 
         from rpbench.articulated.pr2.jskfridge import AV_INIT
         from skrobot.models import PR2
@@ -485,9 +492,15 @@ if __name__ == "__main__":
         base_pose = task.description[-3:]
         pr2.translate(np.hstack([base_pose[:2], 0.0]))
         pr2.rotate(base_pose[2], "z")
+        spec = PR2LarmSpec()
         v.add(pr2)
         v.add(ax)
         v.show()
         import time
+
+        for q in solver._traj_to_pregrasp.resample(100):
+            spec.set_skrobot_model_state(pr2, q)
+            v.redraw()
+            time.sleep(0.1)
 
         time.sleep(1000)
