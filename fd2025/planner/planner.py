@@ -9,7 +9,7 @@ from hifuku.batch_network import BatchFCN
 from hifuku.core import SolutionLibrary
 from hifuku.domain import JSKFridge
 from hifuku.script_utils import load_library
-from plainmp.ompl_solver import OMPLSolver, OMPLSolverConfig
+from plainmp.ompl_solver import OMPLSolver, OMPLSolverConfig, set_random_seed
 from plainmp.psdf import CylinderSDF, Pose
 from rpbench.articulated.pr2.jskfridge import JskFridgeReachingTask, larm_reach_clf
 from rpbench.articulated.vision import create_heightmap_z_slice
@@ -366,15 +366,12 @@ class TampSolver:
 
         if sdf.evaluate(co.worldpos()) < 0.03:
             return False
-        print(f"co distance: {sdf.evaluate(co.worldpos())}")
         co_dummy = co.copy_worldcoords()
         co_dummy.translate([-0.07, 0.0, 0.0])
-        print(f"dummy distance: {sdf.evaluate(co_dummy.worldpos())}")
 
         if sdf.evaluate(co_dummy.worldpos()) < 0.04:
             return False
         co_dummy.translate([-0.07, 0.0, 0.0])
-        print(f"dummy distance2: {sdf.evaluate(co_dummy.worldpos())}")
         if sdf.evaluate(co_dummy.worldpos()) < 0.04:
             return False
         # << ALMOST COPIED FROM JSKFRIDGE
@@ -382,6 +379,9 @@ class TampSolver:
 
 
 if __name__ == "__main__":
+    np_seed = 0
+    np.random.seed(np_seed)
+    set_random_seed(0)
     node = PerceptionDebugNode("20250326_082328")
     detection = node.percept()
     detection.cylinders = [detection.cylinders[2]]
@@ -389,9 +389,7 @@ if __name__ == "__main__":
 
     ax = Axis()
     ax.translate([0.3, -0.1, 1.05])  # easy
-    print(detection)
     task_param = create_task_param(detection, ax.copy_worldcoords())
-    print(task_param)
     task = JskFridgeReachingTask.from_task_param(task_param)
     solver = TampSolver()
     from pyinstrument import Profiler
@@ -402,6 +400,12 @@ if __name__ == "__main__":
     profiler.stop()
     print(profiler.output_text(unicode=True, color=True, show_all=False))
     assert isinstance(task, JskFridgeReachingTask)
+
+    import hashlib
+    import pickle
+
+    md5_hash_of_task = hashlib.md5(pickle.dumps(task)).hexdigest()
+    print(f"md5 hash of task: {md5_hash_of_task}")
     # print(task.to_task_param())
 
     debug = True
