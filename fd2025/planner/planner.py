@@ -5,14 +5,17 @@ from typing import ClassVar, Iterator, List, Optional
 import numpy as np
 from hifuku.domain import JSKFridge
 from hifuku.script_utils import load_library
+from plainmp.constraint import SphereAttachmentSpec
 from plainmp.ik import solve_ik
-from plainmp.ompl_solver import OMPLSolver, set_random_seed
+from plainmp.ompl_solver import OMPLSolver, OMPLSolverConfig, set_random_seed
+from plainmp.problem import Problem
 from plainmp.psdf import CylinderSDF, Pose
 from plainmp.robot_spec import PR2LarmSpec
 from plainmp.trajectory import Trajectory
 from rpbench.articulated.pr2.jskfridge import (
     AV_INIT,
     JskFridgeReachingTask,
+    create_cylinder_points,
     larm_reach_clf,
 )
 from rpbench.articulated.vision import create_heightmap_z_slice
@@ -236,6 +239,42 @@ class TampSolver:
             ):
                 continue
             yield new_obs_co.worldpos()
+
+    def solve_relocation_plan(
+        self, i_pick: int, obstacles: List[CylinderSkelton], q_start: np.ndarray, q_goal: np.ndarray
+    ) -> Optional[Trajectory]:
+        # compute gripper coords
+        model = self._pr2_spec.get_robot_model(deepcopy=False)
+        self._pr2_spec.set_skrobot_model_state(model, q_start)
+        co_gripper_start = model.l_gripper_tool_frame.copy_worldcoords()
+        assert isinstance(co_gripper_start, Coordinates)
+
+        # compute cylinder attachment
+        cylinder_pos = obstacles[i_pick].worldpos()
+        relative_pos = co_gripper_start.inverse_transform_vector(cylinder_pos)
+        offset = 0.025  # assuming that robot slightly lifted it up
+        relative_pos[2] += offset
+        pts = create_cylinder_points(cylinder_move.height, cylinder_move.radius, 8) + relative_pos
+        radii = np.ones(pts.shape[0]) * 0.005
+        attachement = SphereAttachmentSpec("l_gripper_tool_frame", pts.T, radii, False)
+
+        # setup sdf
+        sdf = get_fridge_model_sdf()
+        for i, obstacle in enumerate(obstacles):
+            if i == i_pick:
+                continue
+            sdf.add(CylinderSDF(obstacle.radius, obstacle.height, Pose(obstacle.worldpos())))
+
+        # setup problem
+        coll_cst = self._pr2_spec.create_collision_const(attachements=(attachement,))
+        coll_cst.set_sdf(sdf)
+        lb, ub = self._pr2_spec.angle_bounds()
+        resolution = np.ones(7) * 0.03
+        problem = Problem(q_start, lb, ub, q_goal, coll_cst, None, resolution)
+        solver_config = OMPLSolverConfig(algorithm_range=0.3, shortcut=True, timeout=0.05)
+        solver = OMPLSolver(solver_config)
+        ret = solver.solve(problem)
+        return ret.traj
 
     def solve_motion_plan(
         self, obstacles: List[CylinderSkelton], description: np.ndarray
