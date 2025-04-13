@@ -245,8 +245,11 @@ class TampSolver:
         obstacles = copy.deepcopy(obstacles)
         remove_idx = indices_move[0]
         obstacle_remove = obstacles[remove_idx]
-        radius = obstacle_remove.radius
         region = get_fridge_model().regions[1]
+
+        pose_final_reaching_target = description[:4]
+        co_final_reaching_target = Coordinates(pose_final_reaching_target[:3])
+        co_final_reaching_target.rotate(pose_final_reaching_target[3], "z")
 
         # find reacable pregrasp pose
         pregrasp_pose = None
@@ -273,90 +276,26 @@ class TampSolver:
         self._traj_to_pregrasp = traj_to_pregrasp  # for debug
 
         # determine relocation target
-        center2d = region.box.worldpos()[:2]
-        lb = center2d - 0.5 * region.box.extents[:2] + radius
-        ub = center2d + 0.5 * region.box.extents[:2] - radius
-
-        other_obstacles_pos = np.array([obstacles[i].worldpos()[:2] for i in indices_remain])
-        other_obstacles_radius = np.array([obstacles[i].radius for i in indices_remain])
-
-        pos2d_cands = np.zeros((30, 2))
-        pos3d = obstacle_remove.worldpos()
-
-        target_pose = description[:4]
-        x, y, z, yaw = target_pose
-        target_co = Coordinates([x, y, z])
-        target_co.rotate(yaw, "z")
-
-        valid_count = 0
-        max_attempts = 1000
-        attempts = 0
-
-        while valid_count < 30 and attempts < max_attempts:
-            pos2d = np.random.uniform(lb, ub, 2)
-            print(f"checking {pos2d}...")
-
-            # if other obstacles exist, check collision
-            if other_obstacles_pos.size > 0:
-                distances = np.linalg.norm(other_obstacles_pos - pos2d, axis=1)
-                min_distances = distances - other_obstacles_radius - radius
-                is_any_collision = np.any(min_distances < 0)
-                if is_any_collision:
-                    print(f"collision: {pos2d}")
-                    attempts += 1
-                    continue
-
-            # new obstalce configuration
-            new_obs_co = Coordinates(np.hstack([pos2d, pos3d[2]]))
-            obstacles[indices_move[0]].newcoords(new_obs_co)
-            if not self.is_valid_target_pose(target_co, obstacles, is_grasping=False):
-                print(f"invalid target pose: {pos2d}")
-                attempts += 1
-                continue
-
-            pos2d_cands[valid_count] = pos2d
-            valid_count += 1
-            attempts += 1
-
-        if valid_count < 30:
-            print("no feasible pose found")
-            return None
-
-        # Calculate distances from original position and sort candidates
-        original_pos2d = pos3d[:2]
-        distances = np.linalg.norm(pos2d_cands[:valid_count] - original_pos2d, axis=1)
-        sorted_indices = np.argsort(distances)
-        sorted_pos2d_cands = pos2d_cands[sorted_indices]
-
-        # Create heightmaps for sorted candidates
-        hmap_lst = []
-        obstacle_positions = []  # Store positions for each candidate
-        for pos2d in sorted_pos2d_cands:
-            pos3d_new = pos3d.copy()
-            pos3d_new[:2] = pos2d
-            obstacle_remove.newcoords(Coordinates(pos3d_new))
+        for relocation_target in self._sample_possible_relocation_target_pose(
+            remove_idx, obstacles, co_final_reaching_target
+        ):
+            # check if relocation is feasible initerms of
+            # 1. post-relocate-feasibility
+            # 2. pre-check
+            # 3. check if relocation is reachable
+            # 1. post-relocate-feasibility
+            obstacle_remove.newcoords(Coordinates(relocation_target))
             hmap = create_heightmap_z_slice(region.box, obstacles, 112)
-            hmap_lst.append(hmap)
-            obstacle_positions.append(pos3d_new.copy())  # Save the position
-
-        fs, indices = self._checker.infer(description, hmap_lst)
-
-        for i, (feasible, experience_idx) in enumerate(zip(fs, indices)):
-            if feasible:
-                pos3d_new = obstacle_positions[i]
-                obstacle_remove.newcoords(Coordinates(pos3d_new))
-                world_type = JskFridgeReachingTask.get_world_type()
+            is_est_feasible, _ = self._checker_single.infer_single(description, hmap)
+            if is_est_feasible:
                 obstacles_param = self.obstacles_to_obstacles_param(obstacles, region.box)
-                world = world_type(obstacles_param[: n_obs * 4])
+                world = JskFridgeReachingTask.get_world_type()(obstacles_param[: n_obs * 4])
                 task = JskFridgeReachingTask(world, description.copy())
                 problem = task.export_problem()
-                ret = self._mp_solver.solve(problem, self._lib.init_solutions[experience_idx])
-                if ret.traj is None:
-                    print("not feasible")
-                    continue
-                print("solved!!!")
-                return task
-
+                ret = self._mp_solver.solve(problem, self._lib.init_solutions[0])
+                if ret.traj is not None:
+                    self._traj_final_reach = ret.traj
+                    return task
         return None
 
     def _sample_possible_pre_grasp_pose(
@@ -396,6 +335,44 @@ class TampSolver:
                     yield np.hstack([co_cand.worldpos(), yaw])
         # << DEPEND ON rpbench JSKFridgeTaskBase.sample_pose() method!!
         # ============================================================
+
+    def _sample_possible_relocation_target_pose(
+        self,
+        i_pick: int,
+        obstacles: List[CylinderSkelton],
+        co_final_reaching_target,
+        n_budget: int = 100,
+    ) -> Iterator[np.ndarray]:
+        region = get_fridge_model().regions[1]
+        center2d = region.box.worldpos()[:2]
+        radius = obstacles[i_pick].radius
+        lb = center2d - 0.5 * region.box.extents[:2] + radius
+        ub = center2d + 0.5 * region.box.extents[:2] - radius
+        indices_remain = list(set(range(len(obstacles))) - {i_pick})
+        other_obstacles_pos = np.array([obstacles[i].worldpos()[:2] for i in indices_remain])
+        other_obstacles_radius = np.array([obstacles[i].radius for i in indices_remain])
+        obstacle_pick = obstacles[i_pick]
+        pos2d_original = obstacle_pick.worldpos()[:2]
+        pos2d_cands = np.random.uniform(lb, ub, (n_budget, 2))
+        z = obstacle_pick.worldpos()[2]
+        dists_from_original = np.linalg.norm(pos2d_cands - pos2d_original, axis=1)
+        sorted_indices = np.argsort(dists_from_original)
+        pos2d_cands = pos2d_cands[sorted_indices]
+
+        for pos2d in pos2d_cands:
+            if other_obstacles_pos.size > 0:
+                distances = np.linalg.norm(other_obstacles_pos - pos2d, axis=1)
+                min_distances = distances - other_obstacles_radius - radius
+                is_any_collision = np.any(min_distances < 0)
+                if is_any_collision:
+                    continue
+            new_obs_co = Coordinates(np.hstack([pos2d, z]))
+            obstacles[i_pick].newcoords(new_obs_co)
+            if not self.is_valid_target_pose(
+                co_final_reaching_target, obstacles, is_grasping=False
+            ):
+                continue
+            yield new_obs_co.worldpos()
 
     @staticmethod
     def obstacles_to_obstacles_param(obstacles: List[CylinderSkelton], region_box) -> np.ndarray:
@@ -498,7 +475,8 @@ if __name__ == "__main__":
         v.show()
         import time
 
-        for q in solver._traj_to_pregrasp.resample(100):
+        # for q in solver._traj_to_pregrasp.resample(100):
+        for q in solver._traj_final_reach.resample(100):
             spec.set_skrobot_model_state(pr2, q)
             v.redraw()
             time.sleep(0.1)
