@@ -1,6 +1,6 @@
 import copy
 from dataclasses import dataclass
-from typing import Iterator, List, Optional
+from typing import ClassVar, Iterator, List, Optional
 
 import numpy as np
 import torch
@@ -9,11 +9,16 @@ from hifuku.batch_network import BatchFCN
 from hifuku.core import SolutionLibrary
 from hifuku.domain import JSKFridge
 from hifuku.script_utils import load_library
+from plainmp.ik import solve_ik
 from plainmp.ompl_solver import OMPLSolver, set_random_seed
 from plainmp.psdf import CylinderSDF, Pose
 from plainmp.robot_spec import PR2LarmSpec
 from plainmp.trajectory import Trajectory
-from rpbench.articulated.pr2.jskfridge import JskFridgeReachingTask, larm_reach_clf
+from rpbench.articulated.pr2.jskfridge import (
+    AV_INIT,
+    JskFridgeReachingTask,
+    larm_reach_clf,
+)
 from rpbench.articulated.vision import create_heightmap_z_slice
 from rpbench.articulated.world.jskfridge import get_fridge_model, get_fridge_model_sdf
 from rpbench.articulated.world.utils import CylinderSkelton
@@ -188,6 +193,8 @@ class FeasibilityCheckerBatchImageJit:
 
 
 class TampSolver:
+    CYLINDER_PREGRASP_OFFSET: ClassVar[float] = 0.06
+
     def __init__(self):
         self._lib = load_library(JSKFridge, "cuda", postfix="0.2")
         conf = copy.deepcopy(JSKFridge.solver_config)
@@ -199,6 +206,12 @@ class TampSolver:
         )  # for non-batch inference
         # Initialize region box as a member variable
         self._region_box = get_fridge_model().regions[1].box
+
+        # setup specs
+        self._pr2_spec = PR2LarmSpec(use_fixed_uuid=False)
+        pr2 = self._pr2_spec.get_robot_model(deepcopy=False)
+        pr2.angle_vector(AV_INIT)
+        self._pr2_spec.reflect_kin_to_skrobot_model(pr2)
 
     def solve(self, task_param: np.ndarray):
         task_init = JskFridgeReachingTask.from_task_param(task_param)
@@ -260,9 +273,13 @@ class TampSolver:
             solution = self.solve_motion_plan(obstacles, description_tweak)
             if solution is not None:
                 pregrasp_pose = pregrasp_pose_cand
-                self._traj_to_pregrasp = solution
-                print("found reachable pregrasp pose")
-                break
+                q_final = solution._points[-1]
+                q_grasp = self.solve_grasp_plan(q_final, remove_idx, obstacles)
+                if q_grasp is not None:
+                    self._traj_to_pregrasp = solution
+                    self._q_grasp = q_grasp
+                    break
+                print("grasp pose is not reachable")
         if pregrasp_pose is None:
             return None
 
@@ -282,8 +299,14 @@ class TampSolver:
                 description_tweak[:4] = pregrasp_cand_pose
                 solution = self.solve_motion_plan(obstacles, description_tweak)
                 if solution is not None:
-                    self._traj_final_reach = solution
-                    return solution
+                    q_grasp = self.solve_grasp_plan(solution._points[-1], remove_idx, obstacles)
+                    if q_grasp is not None:
+                        # 3. check if the grasp pose is reachable
+                        self._traj_final_reach = solution
+                        self._q_grasp = q_grasp
+                        break
+                    print("grasp pose is not reachable")
+            return solution
         return None
 
     def _sample_possible_pre_grasp_pose(
@@ -314,7 +337,7 @@ class TampSolver:
                 continue
             yaw = np.random.uniform(-0.25 * np.pi, 0.25 * np.pi)
             co_cand.rotate(yaw, "z")
-            co_cand.translate([-0.06, 0.0, 0.0])
+            co_cand.translate([-self.CYLINDER_PREGRASP_OFFSET, 0.0, 0.0])
             is_reachable = larm_reach_clf.predict(
                 co_cand
             )  # assuming that base pose is already set in solve()
@@ -376,6 +399,34 @@ class TampSolver:
         problem = task.export_problem()
         ret = self._mp_solver.solve(problem, self._lib.init_solutions[traj_idx])
         return ret.traj
+
+    def solve_grasp_plan(
+        self, q_now: np.ndarray, i_pick: int, obstacles: List[CylinderSkelton]
+    ) -> Optional[np.ndarray]:
+        # remove taget cylinder from the collision obstacls and check if the reach toward the
+        # grasp position is feasible
+        obstacles[i_pick]
+        model = self._pr2_spec.get_robot_model()
+        self._pr2_spec.set_skrobot_model_state(model, q_now)
+        self._pr2_spec.reflect_skrobot_model_to_kin(model)
+        co = model.l_gripper_tool_frame.copy_worldcoords()
+        co.translate([self.CYLINDER_PREGRASP_OFFSET, 0.0, 0.0])
+
+        sdf = get_fridge_model_sdf()
+        for i, obstacle in enumerate(obstacles):
+            if i == i_pick:
+                continue
+            sdf.add(CylinderSDF(obstacle.radius, obstacle.height, Pose(obstacle.worldpos())))
+        coll_cst = self._pr2_spec.create_collision_const()
+        coll_cst.set_sdf(sdf)
+        yaw = rpy_angle(co.worldrot())[0][0]
+        pose_goal = np.hstack([co.worldpos(), 0.0, 0.0, yaw])
+        pose_cst = self._pr2_spec.create_gripper_pose_const(pose_goal)
+        lb, ub = self._pr2_spec.angle_bounds()
+        ret = solve_ik(pose_cst, None, lb, ub, q_seed=q_now, max_trial=1)
+        if ret.success:
+            return ret.q
+        return None
 
     @staticmethod
     def obstacles_to_obstacles_param(obstacles: List[CylinderSkelton], region_box) -> np.ndarray:
