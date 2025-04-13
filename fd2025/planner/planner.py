@@ -37,6 +37,7 @@ class TampSolution:
     class RelocationPlan:
         traj_to_pregrasp: Optional[Trajectory] = None  # home -> pregrasp
         q_grasp: Optional[np.ndarray] = None
+        traj_grasp_to_relocate: Optional[Trajectory] = None  # pregrasp -> q_relocate
         q_relocate: Optional[np.ndarray] = None
         traj_to_home: Optional[Trajectory] = None  # q_relocate -> home
 
@@ -67,7 +68,17 @@ class TampSolver:
         task_init = JskFridgeReachingTask.from_task_param(task_param)
 
         target_pose, base_pose = task_init.description[:4], task_init.description[4:7]
+
+        # FIXME: currently solve function assume that base_pose is fixed, so I
+        # first set the base pose here and assume that the base pose is fixed
+        base_co = Coordinates([base_pose[0], base_pose[1], 0.0])
+        base_co.rotate(base_pose[2], "z")
+        pr2 = self._pr2_spec.get_robot_model(deepcopy=False)
+        pr2.newcoords(base_co)
+        self._pr2_spec.reflect_skrobot_model_to_kin(pr2)
+
         larm_reach_clf.set_base_pose(base_pose)
+
         target_pose_xyzrpy = np.hstack([target_pose[:3], 0.0, 0.0, target_pose[3]])
         if not larm_reach_clf.predict(target_pose_xyzrpy):
             return None
@@ -125,13 +136,13 @@ class TampSolver:
         for pregrasp_pose_cand in self._sample_possible_pre_grasp_pose(remove_idx, obstacles):
             description_tweak = description.copy()
             description_tweak[:4] = pregrasp_pose_cand
-            solution = self.solve_motion_plan(obstacles, description_tweak)
-            if solution is not None:
+            solution_relocation = self.solve_motion_plan(obstacles, description_tweak)
+            if solution_relocation is not None:
                 pregrasp_pose = pregrasp_pose_cand
-                q_final = solution._points[-1]
+                q_final = solution_relocation._points[-1]
                 q_grasp = self.solve_grasp_plan(q_final, remove_idx, obstacles)
                 if q_grasp is not None:
-                    reloc_plan.traj_to_pregrasp = solution
+                    reloc_plan.traj_to_pregrasp = solution_relocation
                     reloc_plan.q_grasp = q_grasp
                     break
                 print("grasp pose is not reachable")
@@ -144,9 +155,9 @@ class TampSolver:
         ):
             # 1. post-relocate feasibility check
             obstacle_remove.newcoords(Coordinates(relocation_target))
-            solution = self.solve_motion_plan(obstacles, description)
-            if solution is not None:
-                tamp_solution.traj_final_reach = solution
+            solution_relocation = self.solve_motion_plan(obstacles, description)
+            if solution_relocation is not None:
+                tamp_solution.traj_final_reach = solution_relocation
 
                 # 2. post-relocate reachability check
                 for pregrasp_cand_pose in self._sample_possible_pre_grasp_pose(
@@ -154,14 +165,25 @@ class TampSolver:
                 ):
                     description_tweak = description.copy()
                     description_tweak[:4] = pregrasp_cand_pose
-                    solution = self.solve_motion_plan(obstacles, description_tweak)
-                    if solution is not None:
-                        q_grasp = self.solve_grasp_plan(solution._points[-1], remove_idx, obstacles)
+                    solution_gohome_reversed = self.solve_motion_plan(obstacles, description_tweak)
+                    if solution_gohome_reversed is not None:
+                        # 2.1... ???
+                        q_grasp = self.solve_grasp_plan(
+                            solution_gohome_reversed._points[-1], remove_idx, obstacles
+                        )
                         if q_grasp is not None:
-                            reloc_plan.q_relocate = q_grasp
-                            reloc_plan.traj_to_home = solution
-                            tamp_solution.relocation_seq.append(reloc_plan)
-                            return tamp_solution
+                            # 3. check relocation plan is feasible
+                            solution_relocation = self.solve_relocation_plan(
+                                remove_idx, obstacles, reloc_plan.q_grasp, q_grasp
+                            )
+                            if solution_relocation is not None:
+                                reloc_plan.q_relocate = q_grasp
+                                reloc_plan.traj_to_home = solution_gohome_reversed
+                                reloc_plan.traj_grasp_to_relocate = solution_relocation
+                                tamp_solution.relocation_seq.append(reloc_plan)
+                                return tamp_solution
+                            else:
+                                assert False, "debug"
                         print("grasp pose is not reachable")
         return None
 
@@ -254,7 +276,8 @@ class TampSolver:
         relative_pos = co_gripper_start.inverse_transform_vector(cylinder_pos)
         offset = 0.025  # assuming that robot slightly lifted it up
         relative_pos[2] += offset
-        pts = create_cylinder_points(cylinder_move.height, cylinder_move.radius, 8) + relative_pos
+        cylinder_pick = obstacles[i_pick]
+        pts = create_cylinder_points(cylinder_pick.height, cylinder_pick.radius, 8) + relative_pos
         radii = np.ones(pts.shape[0]) * 0.005
         attachement = SphereAttachmentSpec("l_gripper_tool_frame", pts.T, radii, False)
 
@@ -415,20 +438,30 @@ if __name__ == "__main__":
 
         # replay relocation trajectory
         for reloc_plan in ret.relocation_seq:
+            print("reach to obstacle")
             for q in reloc_plan.traj_to_pregrasp.resample(100):
                 spec.set_skrobot_model_state(pr2, q)
                 v.redraw()
                 time.sleep(0.03)
             input("press enter to continue")
 
+            print("consider IK offset")
             spec.set_skrobot_model_state(pr2, reloc_plan.q_grasp)
             v.redraw()
             input("press enter to continue")
 
+            print("relocation planning")
+            for q in reloc_plan.traj_grasp_to_relocate.resample(100):
+                spec.set_skrobot_model_state(pr2, q)
+                v.redraw()
+                time.sleep(0.03)
+
+            print("q reloc")
             spec.set_skrobot_model_state(pr2, reloc_plan.q_relocate)
             v.redraw()
             input("press enter to continue")
 
+            print("go back to home")
             for q in reloc_plan.traj_to_home.resample(100)[::-1]:
                 spec.set_skrobot_model_state(pr2, q)
                 v.redraw()
@@ -436,6 +469,7 @@ if __name__ == "__main__":
             input("press enter to continue")
 
         # finally reach
+        print("final reach")
         for q in ret.traj_final_reach.resample(100):
             spec.set_skrobot_model_state(pr2, q)
             v.redraw()
