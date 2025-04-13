@@ -1,5 +1,5 @@
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar, Iterator, List, Optional
 
 import numpy as np
@@ -192,6 +192,19 @@ class FeasibilityCheckerBatchImageJit:
         return feasibilities[0], libtraj_idx[0]
 
 
+@dataclass
+class TampSolution:
+    @dataclass
+    class RelocationPlan:
+        traj_to_pregrasp: Optional[Trajectory] = None  # home -> pregrasp
+        q_grasp: Optional[np.ndarray] = None
+        q_relocate: Optional[np.ndarray] = None
+        traj_to_home: Optional[Trajectory] = None  # q_relocate -> home
+
+    traj_final_reach: Optional[Trajectory] = None
+    relocation_seq: List[RelocationPlan] = field(default_factory=list)
+
+
 class TampSolver:
     CYLINDER_PREGRASP_OFFSET: ClassVar[float] = 0.06
 
@@ -213,7 +226,7 @@ class TampSolver:
         pr2.angle_vector(AV_INIT)
         self._pr2_spec.reflect_kin_to_skrobot_model(pr2)
 
-    def solve(self, task_param: np.ndarray):
+    def solve(self, task_param: np.ndarray) -> Optional[TampSolution]:
         task_init = JskFridgeReachingTask.from_task_param(task_param)
 
         target_pose, base_pose = task_init.description[:4], task_init.description[4:7]
@@ -232,11 +245,13 @@ class TampSolver:
             is_est_feasible, _ = self._checker_single.infer_single(task_init.description, hmap_now)
             if is_est_feasible:
                 print("solvable without any replacement")
-                return task_init
+                assert False, "unmaintained branch"
 
         return self._hypothetical_obstacle_delete_check(task_init)
 
-    def _hypothetical_obstacle_delete_check(self, task: JskFridgeReachingTask) -> bool:
+    def _hypothetical_obstacle_delete_check(
+        self, task: JskFridgeReachingTask
+    ) -> Optional[TampSolution]:
 
         obstacles = task.world.get_obstacle_list()
 
@@ -252,7 +267,7 @@ class TampSolver:
 
     def _plan_obstacle_relocation(
         self, description: np.ndarray, obstacles: List[CylinderSkelton], indices_remain: List[int]
-    ):
+    ) -> Optional[TampSolution]:
         n_obs = len(obstacles)
         indices_move = list(set(range(n_obs)) - set(indices_remain))
         assert len(indices_move) == 1  # TODO: support multiple
@@ -263,6 +278,9 @@ class TampSolver:
         pose_final_reaching_target = description[:4]
         co_final_reaching_target = Coordinates(pose_final_reaching_target[:3])
         co_final_reaching_target.rotate(pose_final_reaching_target[3], "z")
+
+        tamp_solution = TampSolution()
+        reloc_plan = TampSolution.RelocationPlan()
 
         # find reacable pregrasp pose
         pregrasp_pose = None
@@ -276,8 +294,8 @@ class TampSolver:
                 q_final = solution._points[-1]
                 q_grasp = self.solve_grasp_plan(q_final, remove_idx, obstacles)
                 if q_grasp is not None:
-                    self._traj_to_pregrasp = solution
-                    self._q_grasp = q_grasp
+                    reloc_plan.traj_to_pregrasp = solution
+                    reloc_plan.q_grasp = q_grasp
                     break
                 print("grasp pose is not reachable")
         if pregrasp_pose is None:
@@ -290,23 +308,24 @@ class TampSolver:
             # 1. post-relocate feasibility check
             obstacle_remove.newcoords(Coordinates(relocation_target))
             solution = self.solve_motion_plan(obstacles, description)
-            if solution is None:
-                continue
+            if solution is not None:
+                tamp_solution.traj_final_reach = solution
 
-            # 2. post-relocate reachability check
-            for pregrasp_cand_pose in self._sample_possible_pre_grasp_pose(remove_idx, obstacles):
-                description_tweak = description.copy()
-                description_tweak[:4] = pregrasp_cand_pose
-                solution = self.solve_motion_plan(obstacles, description_tweak)
-                if solution is not None:
-                    q_grasp = self.solve_grasp_plan(solution._points[-1], remove_idx, obstacles)
-                    if q_grasp is not None:
-                        # 3. check if the grasp pose is reachable
-                        self._traj_final_reach = solution
-                        self._q_grasp = q_grasp
-                        break
-                    print("grasp pose is not reachable")
-            return solution
+                # 2. post-relocate reachability check
+                for pregrasp_cand_pose in self._sample_possible_pre_grasp_pose(
+                    remove_idx, obstacles
+                ):
+                    description_tweak = description.copy()
+                    description_tweak[:4] = pregrasp_cand_pose
+                    solution = self.solve_motion_plan(obstacles, description_tweak)
+                    if solution is not None:
+                        q_grasp = self.solve_grasp_plan(solution._points[-1], remove_idx, obstacles)
+                        if q_grasp is not None:
+                            reloc_plan.q_relocate = q_grasp
+                            reloc_plan.traj_to_home = solution
+                            tamp_solution.relocation_seq.append(reloc_plan)
+                            return tamp_solution
+                        print("grasp pose is not reachable")
         return None
 
     def _sample_possible_pre_grasp_pose(
@@ -406,7 +425,7 @@ class TampSolver:
         # remove taget cylinder from the collision obstacls and check if the reach toward the
         # grasp position is feasible
         obstacles[i_pick]
-        model = self._pr2_spec.get_robot_model()
+        model = self._pr2_spec.get_robot_model(deepcopy=False)
         self._pr2_spec.set_skrobot_model_state(model, q_now)
         self._pr2_spec.reflect_skrobot_model_to_kin(model)
         co = model.l_gripper_tool_frame.copy_worldcoords()
@@ -493,18 +512,12 @@ if __name__ == "__main__":
 
     profiler = Profiler()
     profiler.start()
-    solver.solve(task_param)
+    ret = solver.solve(task_param)
     profiler.stop()
     print(profiler.output_text(unicode=True, color=True, show_all=False))
+    print(ret)
 
-    import hashlib
-    import pickle
-
-    md5_hash_of_task = hashlib.md5(pickle.dumps(task)).hexdigest()
-    print(f"md5 hash of task: {md5_hash_of_task}")
-    # print(task.to_task_param())
-
-    debug = True
+    debug = False
     if debug:
         v = detection.visualize()
         task = JskFridgeReachingTask.from_task_param(task_param)
