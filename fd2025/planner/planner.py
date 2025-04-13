@@ -12,6 +12,7 @@ from hifuku.script_utils import load_library
 from plainmp.ompl_solver import OMPLSolver, set_random_seed
 from plainmp.psdf import CylinderSDF, Pose
 from plainmp.robot_spec import PR2LarmSpec
+from plainmp.trajectory import Trajectory
 from rpbench.articulated.pr2.jskfridge import JskFridgeReachingTask, larm_reach_clf
 from rpbench.articulated.vision import create_heightmap_z_slice
 from rpbench.articulated.world.jskfridge import get_fridge_model, get_fridge_model_sdf
@@ -196,6 +197,8 @@ class TampSolver:
         self._checker_single = FeasibilityCheckerBatchImageJit(
             self._lib, 1
         )  # for non-batch inference
+        # Initialize region box as a member variable
+        self._region_box = get_fridge_model().regions[1].box
 
     def solve(self, task_param: np.ndarray):
         task_init = JskFridgeReachingTask.from_task_param(task_param)
@@ -212,8 +215,7 @@ class TampSolver:
         obstacle_list = task_init.world.get_obstacle_list()
         if self.is_valid_target_pose(co, obstacle_list, is_grasping=False):
             print("valid target pose without any replacement")
-            region = get_fridge_model().regions[task_init.world.attention_region_index]
-            hmap_now = create_heightmap_z_slice(region.box, obstacle_list, 112)
+            hmap_now = create_heightmap_z_slice(self._region_box, obstacle_list, 112)
             is_est_feasible, _ = self._checker_single.infer_single(task_init.description, hmap_now)
             if is_est_feasible:
                 print("solvable without any replacement")
@@ -223,14 +225,13 @@ class TampSolver:
 
     def _hypothetical_obstacle_delete_check(self, task: JskFridgeReachingTask) -> bool:
 
-        region = get_fridge_model().regions[task.world.attention_region_index]
         obstacles = task.world.get_obstacle_list()
 
         # consider removing single obstacle
         for i in range(len(obstacles)):
             indices_remain = list(set(range(len(obstacles))) - {i})
             lst_remain = [obstacles[i] for i in indices_remain]
-            hmap = create_heightmap_z_slice(region.box, lst_remain, 112)
+            hmap = create_heightmap_z_slice(self._region_box, lst_remain, 112)
             is_est_feasible, _ = self._checker_single.infer_single(task.description, hmap)
             if is_est_feasible:
                 return self._plan_obstacle_relocation(task.description, obstacles, indices_remain)
@@ -245,7 +246,6 @@ class TampSolver:
         obstacles = copy.deepcopy(obstacles)
         remove_idx = indices_move[0]
         obstacle_remove = obstacles[remove_idx]
-        region = get_fridge_model().regions[1]
 
         pose_final_reaching_target = description[:4]
         co_final_reaching_target = Coordinates(pose_final_reaching_target[:3])
@@ -254,24 +254,17 @@ class TampSolver:
         # find reacable pregrasp pose
         pregrasp_pose = None
         traj_to_pregrasp = None
-        hmap_current = create_heightmap_z_slice(region.box, obstacles, 112)
+        create_heightmap_z_slice(self._region_box, obstacles, 112)
         for pregrasp_pose_cand in self._sample_possible_pre_grasp_pose(remove_idx, obstacles):
             description_tweak = description.copy()
             description_tweak[:4] = pregrasp_pose_cand
-            feasible, traj_idx = self._checker_single.infer_single(description_tweak, hmap_current)
-            if feasible:
-                obstacles_param = self.obstacles_to_obstacles_param(obstacles, region.box)
-                world = JskFridgeReachingTask.get_world_type()(obstacles_param[: n_obs * 4])
-                task = JskFridgeReachingTask(world, description_tweak)
-                problem = task.export_problem()
-                ret = self._mp_solver.solve(problem, self._lib.init_solutions[traj_idx])
-                if ret.traj is not None:
-                    pregrasp_pose = pregrasp_pose_cand
-                    traj_to_pregrasp = ret.traj
-                    print("found reachable pregrasp pose")
-                    break
+            solution = self.solve_motion_plan(obstacles, description_tweak)
+            if solution is not None:
+                pregrasp_pose = pregrasp_pose_cand
+                traj_to_pregrasp = solution
+                print("found reachable pregrasp pose")
+                break
         if pregrasp_pose is None:
-            print("no feasible pregrasp pose")
             return None
         self._traj_to_pregrasp = traj_to_pregrasp  # for debug
 
@@ -285,17 +278,10 @@ class TampSolver:
             # 3. check if relocation is reachable
             # 1. post-relocate-feasibility
             obstacle_remove.newcoords(Coordinates(relocation_target))
-            hmap = create_heightmap_z_slice(region.box, obstacles, 112)
-            is_est_feasible, _ = self._checker_single.infer_single(description, hmap)
-            if is_est_feasible:
-                obstacles_param = self.obstacles_to_obstacles_param(obstacles, region.box)
-                world = JskFridgeReachingTask.get_world_type()(obstacles_param[: n_obs * 4])
-                task = JskFridgeReachingTask(world, description.copy())
-                problem = task.export_problem()
-                ret = self._mp_solver.solve(problem, self._lib.init_solutions[0])
-                if ret.traj is not None:
-                    self._traj_final_reach = ret.traj
-                    return task
+            solution = self.solve_motion_plan(obstacles, description)
+            if solution is not None:
+                self._traj_final_reach = solution
+                return task
         return None
 
     def _sample_possible_pre_grasp_pose(
@@ -343,11 +329,10 @@ class TampSolver:
         co_final_reaching_target,
         n_budget: int = 100,
     ) -> Iterator[np.ndarray]:
-        region = get_fridge_model().regions[1]
-        center2d = region.box.worldpos()[:2]
+        center2d = self._region_box.worldpos()[:2]
         radius = obstacles[i_pick].radius
-        lb = center2d - 0.5 * region.box.extents[:2] + radius
-        ub = center2d + 0.5 * region.box.extents[:2] - radius
+        lb = center2d - 0.5 * self._region_box.extents[:2] + radius
+        ub = center2d + 0.5 * self._region_box.extents[:2] - radius
         indices_remain = list(set(range(len(obstacles))) - {i_pick})
         other_obstacles_pos = np.array([obstacles[i].worldpos()[:2] for i in indices_remain])
         other_obstacles_radius = np.array([obstacles[i].radius for i in indices_remain])
@@ -373,6 +358,22 @@ class TampSolver:
             ):
                 continue
             yield new_obs_co.worldpos()
+
+    def solve_motion_plan(
+        self, obstacles: List[CylinderSkelton], description: np.ndarray
+    ) -> Optional[Trajectory]:
+
+        hmap_current = create_heightmap_z_slice(self._region_box, obstacles, 112)
+        feasible, traj_idx = self._checker_single.infer_single(description, hmap_current)
+        if not feasible:
+            return None
+
+        obstacles_param = self.obstacles_to_obstacles_param(obstacles, self._region_box)
+        world = JskFridgeReachingTask.get_world_type()(obstacles_param[: len(obstacles) * 4])
+        task = JskFridgeReachingTask(world, description)
+        problem = task.export_problem()
+        ret = self._mp_solver.solve(problem, self._lib.init_solutions[traj_idx])
+        return ret.traj
 
     @staticmethod
     def obstacles_to_obstacles_param(obstacles: List[CylinderSkelton], region_box) -> np.ndarray:
