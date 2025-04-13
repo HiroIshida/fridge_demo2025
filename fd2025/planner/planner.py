@@ -24,6 +24,8 @@ from rpbench.articulated.world.jskfridge import get_fridge_model, get_fridge_mod
 from rpbench.articulated.world.utils import CylinderSkelton
 from skrobot.coordinates import Coordinates, rpy_angle
 from skrobot.model.primitives import Axis
+from skrobot.models import PR2
+from skrobot.viewers import PyrenderViewer
 
 from fd2025.perception.perception_node import FridgeEnvDetection, PerceptionDebugNode
 
@@ -517,17 +519,10 @@ if __name__ == "__main__":
     print(profiler.output_text(unicode=True, color=True, show_all=False))
     print(ret)
 
-    debug = False
+    debug = True
     if debug:
-        v = detection.visualize()
+        # v = detection.visualize()
         task = JskFridgeReachingTask.from_task_param(task_param)
-        # ret = task.solve_default()
-        # print(ret)
-
-        from rpbench.articulated.pr2.jskfridge import AV_INIT
-        from skrobot.models import PR2
-        from skrobot.viewers import PyrenderViewer
-
         v = PyrenderViewer()
         task.world.visualize(v)
         pr2 = PR2(use_tight_joint_limit=False)
@@ -541,10 +536,32 @@ if __name__ == "__main__":
         v.show()
         import time
 
-        # for q in solver._traj_to_pregrasp.resample(100):
-        for q in solver._traj_final_reach.resample(100):
+        # replay relocation trajectory
+        for reloc_plan in ret.relocation_seq:
+            for q in reloc_plan.traj_to_pregrasp.resample(100):
+                spec.set_skrobot_model_state(pr2, q)
+                v.redraw()
+                time.sleep(0.03)
+            input("press enter to continue")
+
+            spec.set_skrobot_model_state(pr2, reloc_plan.q_grasp)
+            v.redraw()
+            input("press enter to continue")
+
+            spec.set_skrobot_model_state(pr2, reloc_plan.q_relocate)
+            v.redraw()
+            input("press enter to continue")
+
+            for q in reloc_plan.traj_to_home.resample(100)[::-1]:
+                spec.set_skrobot_model_state(pr2, q)
+                v.redraw()
+                time.sleep(0.03)
+            input("press enter to continue")
+
+        # finally reach
+        for q in ret.traj_final_reach.resample(100):
             spec.set_skrobot_model_state(pr2, q)
             v.redraw()
-            time.sleep(0.1)
+            time.sleep(0.03)
 
         time.sleep(1000)
