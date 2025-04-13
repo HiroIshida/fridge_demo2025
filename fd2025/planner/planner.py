@@ -253,7 +253,6 @@ class TampSolver:
 
         # find reacable pregrasp pose
         pregrasp_pose = None
-        traj_to_pregrasp = None
         create_heightmap_z_slice(self._region_box, obstacles, 112)
         for pregrasp_pose_cand in self._sample_possible_pre_grasp_pose(remove_idx, obstacles):
             description_tweak = description.copy()
@@ -261,27 +260,30 @@ class TampSolver:
             solution = self.solve_motion_plan(obstacles, description_tweak)
             if solution is not None:
                 pregrasp_pose = pregrasp_pose_cand
-                traj_to_pregrasp = solution
+                self._traj_to_pregrasp = solution
                 print("found reachable pregrasp pose")
                 break
         if pregrasp_pose is None:
             return None
-        self._traj_to_pregrasp = traj_to_pregrasp  # for debug
 
         # determine relocation target
         for relocation_target in self._sample_possible_relocation_target_pose(
             remove_idx, obstacles, co_final_reaching_target
         ):
-            # check if relocation is feasible initerms of
-            # 1. post-relocate-feasibility
-            # 2. pre-check
-            # 3. check if relocation is reachable
-            # 1. post-relocate-feasibility
+            # 1. post-relocate feasibility check
             obstacle_remove.newcoords(Coordinates(relocation_target))
             solution = self.solve_motion_plan(obstacles, description)
-            if solution is not None:
-                self._traj_final_reach = solution
-                return task
+            if solution is None:
+                continue
+
+            # 2. post-relocate reachability check
+            for pregrasp_cand_pose in self._sample_possible_pre_grasp_pose(remove_idx, obstacles):
+                description_tweak = description.copy()
+                description_tweak[:4] = pregrasp_cand_pose
+                solution = self.solve_motion_plan(obstacles, description_tweak)
+                if solution is not None:
+                    self._traj_final_reach = solution
+                    return solution
         return None
 
     def _sample_possible_pre_grasp_pose(
@@ -440,10 +442,9 @@ if __name__ == "__main__":
 
     profiler = Profiler()
     profiler.start()
-    task = solver.solve(task_param)
+    solver.solve(task_param)
     profiler.stop()
     print(profiler.output_text(unicode=True, color=True, show_all=False))
-    assert isinstance(task, JskFridgeReachingTask)
 
     import hashlib
     import pickle
