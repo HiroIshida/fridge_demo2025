@@ -411,6 +411,11 @@ if __name__ == "__main__":
     print(profiler.output_text(unicode=True, color=True, show_all=False))
     print(ret)
 
+    import hashlib
+    import pickle
+    hash_value = hashlib.sha256(pickle.dumps(ret)).hexdigest()
+    print(f"hash_value: {hash_value}")
+
     debug = True
     if debug:
         # v = detection.visualize()
