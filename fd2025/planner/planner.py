@@ -89,35 +89,6 @@ def create_task_param(detection: FridgeEnvDetection, target_coords: Coordinates)
     return task_param
 
 
-class ActionEdge:
-    ...
-
-
-class ReachAction(ActionEdge):
-    ...
-
-
-@dataclass
-class MoveCanAction(ActionEdge):
-    idx_can: int
-    # detail
-    start_pos: Optional[np.ndarray] = None
-    target_pos: Optional[np.ndarray] = None
-
-
-@dataclass
-class MoveBaseAction(ActionEdge):
-    # detail
-    start_pose: np.ndarray
-    target_pose: np.ndarray
-
-
-class Node:
-    state: np.ndarray
-    parent: Optional["Node"]
-    action: Optional[ActionEdge]
-
-
 class FeasibilityCheckerBatchImageJit:
     ae_model_shared: torch.jit.ScriptModule
 
