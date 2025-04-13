@@ -107,10 +107,8 @@ class TampSolver:
         conf = copy.deepcopy(JSKFridge.solver_config)
         conf.n_max_call *= 2  # ensure enough time
         self._mp_solver = OMPLSolver(conf)
-        self._checker = FeasibilityCheckerBatchImageJit(self._lib, 30)
-        self._checker_single = FeasibilityCheckerBatchImageJit(
-            self._lib, 1
-        )  # for non-batch inference
+        self._checker = FeasibilityCheckerBatchImageJit(self._lib, 30, 7)
+        self._checker_single = FeasibilityCheckerBatchImageJit(self._lib, 1, 7)
         # Initialize region box as a member variable
         self._region_box = get_fridge_model().regions[1].box
 
@@ -413,6 +411,7 @@ if __name__ == "__main__":
 
     import hashlib
     import pickle
+
     hash_value = hashlib.sha256(pickle.dumps(ret)).hexdigest()
     print(f"hash_value: {hash_value}")
 

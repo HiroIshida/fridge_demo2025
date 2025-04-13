@@ -10,7 +10,7 @@ from hifuku.core import SolutionLibrary
 class FeasibilityCheckerBatchImageJit:
     ae_model_shared: torch.jit.ScriptModule
 
-    def __init__(self, lib: SolutionLibrary, n_batch: int):
+    def __init__(self, lib: SolutionLibrary, n_batch: int, n_vec_feature: int):
         self.dummy_encoded = torch.zeros(n_batch, 200).float().cuda()
         self.biases = torch.tensor(lib.biases).float().cuda()
         self.max_admissible_cost = lib.max_admissible_cost
@@ -52,12 +52,15 @@ class FeasibilityCheckerBatchImageJit:
                 return super().cuda()
 
         tmp = Tmp(fcn_linears_batch, fcn_expanders_batch, len(lib.predictors)).cuda()
-        dummy_input = (torch.zeros(n_batch, 200).float().cuda(), torch.zeros(7).float().cuda())
+        dummy_input = (
+            torch.zeros(n_batch, 200).float().cuda(),
+            torch.zeros(n_vec_feature).float().cuda(),
+        )
         traced = torch.jit.trace(tmp, dummy_input)
         self.batch_predictor = torch.jit.optimize_for_inference(traced)
 
         # warm up
-        vector = np.random.randn(7).astype(np.float32)
+        vector = np.random.randn(n_vec_feature).astype(np.float32)
         hmaps = [np.random.randn(112, 112).astype(np.float32) for _ in range(n_batch)]
         for _ in range(10):
             self.infer(vector, hmaps)
