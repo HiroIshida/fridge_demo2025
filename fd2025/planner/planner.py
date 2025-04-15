@@ -296,8 +296,13 @@ class TampSolver:
         coll_cst = self._pr2_spec.create_collision_const(attachements=(attachement,))
         coll_cst.set_sdf(sdf)
         lb, ub = self._pr2_spec.angle_bounds()
+
+        # confine the search space
+        q_min = np.maximum(np.minimum(q_start, q_goal) - 0.6, lb)
+        q_max = np.minimum(np.maximum(q_start, q_goal) + 0.6, ub)
+
         resolution = np.ones(7) * 0.03
-        problem = Problem(q_start, lb, ub, q_goal, coll_cst, None, resolution)
+        problem = Problem(q_start, q_min, q_max, q_goal, coll_cst, None, resolution)
         solver_config = OMPLSolverConfig(algorithm_range=0.3, shortcut=True, timeout=0.05)
         solver = OMPLSolver(solver_config)
         ret = solver.solve(problem)
