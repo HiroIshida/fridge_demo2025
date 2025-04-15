@@ -1,3 +1,7 @@
+import warnings
+
+warnings.filterwarnings("ignore")
+
 import copy
 from dataclasses import dataclass, field
 from typing import ClassVar, Iterator, List, Optional
@@ -404,14 +408,7 @@ if __name__ == "__main__":
     task_param = create_task_param(detection, ax.copy_worldcoords())
     task = JskFridgeReachingTask.from_task_param(task_param)
     solver = TampSolver()
-    from pyinstrument import Profiler
-
-    profiler = Profiler()
-    profiler.start()
     ret = solver.solve(task_param)
-    profiler.stop()
-    print(profiler.output_text(unicode=True, color=True, show_all=False))
-    print(ret)
 
     import hashlib
     import pickle
