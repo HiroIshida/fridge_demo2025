@@ -53,7 +53,7 @@ class TampSolver:
     CYLINDER_PREGRASP_OFFSET: ClassVar[float] = 0.06
 
     def __init__(self):
-        self._lib = load_library(JSKFridge, "cuda", postfix="0.2")
+        self._lib = load_library(JSKFridge, "cuda", postfix="0.1")
         conf = copy.deepcopy(JSKFridge.solver_config)
         conf.n_max_call *= 2  # ensure enough time
         self._mp_solver = OMPLSolver(conf)
