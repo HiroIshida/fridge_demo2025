@@ -49,16 +49,10 @@ class TampSolution:
     relocation_seq: List[RelocationPlan] = field(default_factory=list)
 
 
-class TampSolver:
+class TampSolverBase:
     CYLINDER_PREGRASP_OFFSET: ClassVar[float] = 0.06
 
     def __init__(self):
-        self._lib = load_library(JSKFridge, "cuda", postfix="0.1")
-        conf = copy.deepcopy(JSKFridge.solver_config)
-        conf.n_max_call *= 2  # ensure enough time
-        self._mp_solver = OMPLSolver(conf)
-        self._checker = FeasibilityCheckerBatchImageJit(self._lib, 30, 7)
-        self._checker_single = FeasibilityCheckerBatchImageJit(self._lib, 1, 7)
         # Initialize region box as a member variable
         self._region_box = get_fridge_model().regions[1].box
 
@@ -93,9 +87,7 @@ class TampSolver:
         obstacle_list = task_init.world.get_obstacle_list()
         if self.is_valid_target_pose(co, obstacle_list, is_grasping=False):
             print("valid target pose without any replacement")
-            hmap_now = create_heightmap_z_slice(self._region_box, obstacle_list, 112)
-            is_est_feasible, _ = self._checker_single.infer_single(task_init.description, hmap_now)
-            if is_est_feasible:
+            if self.is_feasible(obstacle_list, task_init.description):
                 print("solvable without any replacement")
                 assert False, "unmaintained branch"
 
@@ -111,10 +103,10 @@ class TampSolver:
         for i in range(len(obstacles)):
             indices_remain = list(set(range(len(obstacles))) - {i})
             lst_remain = [obstacles[i] for i in indices_remain]
-            hmap = create_heightmap_z_slice(self._region_box, lst_remain, 112)
-            is_est_feasible, _ = self._checker_single.infer_single(task.description, hmap)
+            is_est_feasible = self.is_feasible(lst_remain, task.description)
             if is_est_feasible:
                 return self._plan_obstacle_relocation(task.description, obstacles, indices_remain)
+            print("not feasible!")
         return None
 
     def _plan_obstacle_relocation(
@@ -308,22 +300,6 @@ class TampSolver:
         ret = solver.solve(problem)
         return ret.traj
 
-    def solve_motion_plan(
-        self, obstacles: List[CylinderSkelton], description: np.ndarray
-    ) -> Optional[Trajectory]:
-
-        hmap_current = create_heightmap_z_slice(self._region_box, obstacles, 112)
-        feasible, traj_idx = self._checker_single.infer_single(description, hmap_current)
-        if not feasible:
-            return None
-
-        obstacles_param = self.obstacles_to_obstacles_param(obstacles, self._region_box)
-        world = JskFridgeReachingTask.get_world_type()(obstacles_param[: len(obstacles) * 4])
-        task = JskFridgeReachingTask(world, description)
-        problem = task.export_problem()
-        ret = self._mp_solver.solve(problem, self._lib.init_solutions[traj_idx])
-        return ret.traj
-
     def solve_grasp_plan(
         self, q_now: np.ndarray, i_pick: int, obstacles: List[CylinderSkelton]
     ) -> Optional[np.ndarray]:
@@ -397,6 +373,60 @@ class TampSolver:
         # << DEPEND ON rpbench JSKFridgeTaskBase.sample_pose() method!!
         # ============================================================
         return True
+
+
+class TampSolverCoverLib(TampSolverBase):
+    def __init__(self):
+        super().__init__()
+        self._lib = load_library(JSKFridge, "cuda", postfix="0.1")
+        conf = copy.deepcopy(JSKFridge.solver_config)
+        conf.n_max_call *= 2  # ensure enough time
+        self._mp_solver = OMPLSolver(conf)
+        self._checker = FeasibilityCheckerBatchImageJit(self._lib, 30, 7)
+        self._checker_single = FeasibilityCheckerBatchImageJit(self._lib, 1, 7)
+
+    def is_feasible(self, obstacles: List[CylinderSkelton], description: np.ndarray) -> bool:
+        hmap_now = create_heightmap_z_slice(self._region_box, obstacles, 112)
+        is_est_feasible, _ = self._checker_single.infer_single(description, hmap_now)
+        return is_est_feasible
+
+    def solve_motion_plan(
+        self, obstacles: List[CylinderSkelton], description: np.ndarray
+    ) -> Optional[Trajectory]:
+
+        hmap_current = create_heightmap_z_slice(self._region_box, obstacles, 112)
+        feasible, traj_idx = self._checker_single.infer_single(description, hmap_current)
+        if not feasible:
+            print("not feasible!")
+            return None
+
+        obstacles_param = self.obstacles_to_obstacles_param(obstacles, self._region_box)
+        world = JskFridgeReachingTask.get_world_type()(obstacles_param[: len(obstacles) * 4])
+        task = JskFridgeReachingTask(world, description)
+        problem = task.export_problem()
+        ret = self._mp_solver.solve(problem, self._lib.init_solutions[traj_idx])
+        return ret.traj
+
+
+class TampSolverNaive(TampSolverBase):
+    def __init__(self, timeout: float = 0.1):
+        super().__init__()
+        conf = OMPLSolverConfig(timeout=timeout)
+        self._mp_solver = OMPLSolver(conf)
+
+    def is_feasible(self, obstacles: List[CylinderSkelton], description: np.ndarray) -> bool:
+        traj = self.solve_motion_plan(obstacles, description)
+        return traj is not None
+
+    def solve_motion_plan(
+        self, obstacles: List[CylinderSkelton], description: np.ndarray
+    ) -> Optional[Trajectory]:
+        obstacles_param = self.obstacles_to_obstacles_param(obstacles, self._region_box)
+        world = JskFridgeReachingTask.get_world_type()(obstacles_param[: len(obstacles) * 4])
+        task = JskFridgeReachingTask(world, description)
+        problem = task.export_problem()
+        ret = self._mp_solver.solve(problem)
+        return ret.traj
 
 
 if __name__ == "__main__":
