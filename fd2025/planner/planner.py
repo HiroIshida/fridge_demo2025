@@ -250,8 +250,8 @@ class TampSolverBase:
         pos2d_cands = np.random.uniform(lb, ub, (n_budget, 2))
         z = obstacle_pick.worldpos()[2]
         dists_from_original = np.linalg.norm(pos2d_cands - pos2d_original, axis=1)
-        sorted_indices = np.argsort(dists_from_original)
-        pos2d_cands = pos2d_cands[sorted_indices]
+        # sorted_indices = np.argsort(dists_from_original)
+        # pos2d_cands = pos2d_cands[sorted_indices]
 
         for pos2d in pos2d_cands:
             if other_obstacles_pos.size > 0:
@@ -305,7 +305,7 @@ class TampSolverBase:
 
         resolution = np.ones(7) * 0.03
         problem = Problem(q_start, q_min, q_max, q_goal, coll_cst, None, resolution)
-        solver_config = OMPLSolverConfig(algorithm_range=0.3, shortcut=True, timeout=0.05)
+        solver_config = OMPLSolverConfig(algorithm_range=0.5, shortcut=True, timeout=0.05)
         solver = OMPLSolver(solver_config)
         ret = solver.solve(problem)
         return ret.traj
@@ -441,19 +441,29 @@ class TampSolverNaive(TampSolverBase):
 
 if __name__ == "__main__":
     np_seed = 0
-    np.random.seed(np_seed)
+    # np.random.seed(np_seed)
     set_random_seed(0)
     node = PerceptionDebugNode("20250326_082328")
     detection = node.percept()
-    detection.cylinders = [detection.cylinders[2]]
+    c_jama = detection.cylinders[2]
+    c_other = detection.cylinders[0]
+    c_other.translate([-0.12, -0.03, 0.0])
+    detection.cylinders = [c_jama, c_other]
     # detection.cylinders = []
 
     ax = Axis()
     ax.translate([0.3, -0.1, 1.05])  # easy
     task_param = create_task_param(detection, ax.copy_worldcoords())
     task = JskFridgeReachingTask.from_task_param(task_param)
-    solver = TampSolver()
+    solver = TampSolverCoverLib()
+    # solver = TampSolverNaive(timeout=0.3)
+    from pyinstrument import Profiler
+
+    profiler = Profiler()
+    profiler.start()
     ret = solver.solve(task_param)
+    profiler.stop()
+    print(profiler.output_text(unicode=True, color=True, show_all=False))
 
     import hashlib
     import pickle
