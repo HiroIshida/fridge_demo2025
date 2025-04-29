@@ -126,61 +126,67 @@ class TampSolverBase:
         tamp_solution = TampSolution()
         reloc_plan = TampSolution.RelocationPlan()
 
-        # find reacable pregrasp pose
+        # 1. Determine how to reach and grasp remove_idx obstacle
         pregrasp_pose = None
         create_heightmap_z_slice(self._region_box, obstacles, 112)
         for pregrasp_pose_cand in self._sample_possible_pre_grasp_pose(remove_idx, obstacles):
             description_tweak = description.copy()
             description_tweak[:4] = pregrasp_pose_cand
-            solution_relocation = self.solve_motion_plan(obstacles, description_tweak)
+            solution_relocation = self.solve_motion_plan(
+                obstacles, description_tweak
+            )  # check if reachable
             if solution_relocation is not None:
                 pregrasp_pose = pregrasp_pose_cand
                 q_final = solution_relocation._points[-1]
-                q_grasp = self.solve_grasp_plan(q_final, remove_idx, obstacles)
+                q_grasp = self.solve_grasp_plan(
+                    q_final, remove_idx, obstacles
+                )  # check if graspable
                 if q_grasp is not None:
                     reloc_plan.traj_to_pregrasp = solution_relocation
                     reloc_plan.q_grasp = q_grasp
                     break
-                print("grasp pose is not reachable")
+                print("grasp pose is not reachable A")
         if pregrasp_pose is None:
             return None
 
-        # determine relocation target
         for relocation_target in self._sample_possible_relocation_target_pose(
             remove_idx, obstacles, co_final_reaching_target
         ):
-            # 1. post-relocate feasibility check
+            # 2. post-relocate feasibility check
             obstacle_remove.newcoords(Coordinates(relocation_target))
             solution_relocation = self.solve_motion_plan(obstacles, description)
-            if solution_relocation is not None:
-                tamp_solution.traj_final_reach = solution_relocation
+            if solution_relocation is None:
+                continue
+            tamp_solution.traj_final_reach = solution_relocation
 
-                # 2. post-relocate reachability check
-                for pregrasp_cand_pose in self._sample_possible_pre_grasp_pose(
-                    remove_idx, obstacles
-                ):
-                    description_tweak = description.copy()
-                    description_tweak[:4] = pregrasp_cand_pose
-                    solution_gohome_reversed = self.solve_motion_plan(obstacles, description_tweak)
-                    if solution_gohome_reversed is not None:
-                        # 2.1... ???
-                        q_grasp = self.solve_grasp_plan(
-                            solution_gohome_reversed._points[-1], remove_idx, obstacles
-                        )
-                        if q_grasp is not None:
-                            # 3. check relocation plan is feasible
-                            solution_relocation = self.solve_relocation_plan(
-                                remove_idx, obstacles, reloc_plan.q_grasp, q_grasp
-                            )
-                            if solution_relocation is not None:
-                                reloc_plan.q_relocate = q_grasp
-                                reloc_plan.traj_to_home = solution_gohome_reversed
-                                reloc_plan.traj_grasp_to_relocate = solution_relocation
-                                tamp_solution.relocation_seq.append(reloc_plan)
-                                return tamp_solution
-                            else:
-                                assert False, "debug"
-                        print("grasp pose is not reachable")
+            for pregrasp_cand_pose in self._sample_possible_pre_grasp_pose(remove_idx, obstacles):
+                # 3. post-relocate final-pregrasp reachability check
+                description_tweak = description.copy()
+                description_tweak[:4] = pregrasp_cand_pose
+                solution_gohome_reversed = self.solve_motion_plan(obstacles, description_tweak)
+                if solution_gohome_reversed is None:
+                    continue
+
+                # 3.1. post-relocate final-grasp check
+                q_grasp = self.solve_grasp_plan(
+                    solution_gohome_reversed._points[-1], remove_idx, obstacles
+                )
+                if q_grasp is None:
+                    continue
+
+                # 4. check relocation plan is feasible
+                solution_relocation = self.solve_relocation_plan(
+                    remove_idx, obstacles, reloc_plan.q_grasp, q_grasp
+                )
+                if solution_relocation is None:
+                    continue
+
+                # OK! now, pack the solutions and return
+                reloc_plan.q_relocate = q_grasp
+                reloc_plan.traj_to_home = solution_gohome_reversed
+                reloc_plan.traj_grasp_to_relocate = solution_relocation
+                tamp_solution.relocation_seq.append(reloc_plan)
+                return tamp_solution
         return None
 
     def _sample_possible_pre_grasp_pose(
