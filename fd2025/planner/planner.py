@@ -30,9 +30,8 @@ from skrobot.model.primitives import Axis
 from skrobot.models import PR2
 from skrobot.viewers import PyrenderViewer
 
-from fd2025.perception.perception_node import PerceptionDebugNode
-from fd2025.planner.bridge import create_task_param
 from fd2025.planner.inference import FeasibilityCheckerBatchImageJit
+from fd2025.planner.problem_set import problem_single_object_blocking
 
 
 @dataclass
@@ -443,24 +442,16 @@ class TampSolverNaive(TampSolverBase):
 
 if __name__ == "__main__":
     np_seed = 0
-    # np.random.seed(np_seed)
+    np.random.seed(np_seed)
     set_random_seed(0)
-    node = PerceptionDebugNode("20250326_082328")
-    detection = node.percept()
-    c_jama = detection.cylinders[2]
-    c_other = detection.cylinders[0]
-    c_other.translate([-0.12, -0.03, 0.0])
-    detection.cylinders = [c_jama, c_other]
-    # detection.cylinders = []
+    tamp_problem = problem_single_object_blocking()
+    task_param = tamp_problem.to_param()
 
-    ax = Axis()
-    ax.translate([0.3, -0.1, 1.05])  # easy
-    task_param = create_task_param(detection, ax.copy_worldcoords())
     task = JskFridgeReachingTask.from_task_param(task_param)
     solver = TampSolverCoverLib()
     # solver = TampSolverNaive(timeout=0.3)
-    from pyinstrument import Profiler
 
+    from pyinstrument import Profiler
     profiler = Profiler()
     profiler.start()
     ret = solver.solve(task_param)
@@ -485,6 +476,8 @@ if __name__ == "__main__":
         pr2.translate(np.hstack([base_pose[:2], 0.0]))
         pr2.rotate(base_pose[2], "z")
         spec = PR2LarmSpec()
+        ax = Axis()
+        ax.newcoords(tamp_problem.target_co)
         v.add(pr2)
         v.add(ax)
         v.show()
