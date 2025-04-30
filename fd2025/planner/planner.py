@@ -300,12 +300,12 @@ class TampSolverBase:
         lb, ub = self._pr2_spec.angle_bounds()
 
         # confine the search space
-        q_min = np.maximum(np.minimum(q_start, q_goal) - 0.6, lb)
-        q_max = np.minimum(np.maximum(q_start, q_goal) + 0.6, ub)
+        q_min = np.maximum(np.minimum(q_start, q_goal) - 0.3, lb)
+        q_max = np.minimum(np.maximum(q_start, q_goal) + 0.3, ub)
 
         resolution = np.ones(7) * 0.03
         problem = Problem(q_start, q_min, q_max, q_goal, coll_cst, None, resolution)
-        solver_config = OMPLSolverConfig(algorithm_range=0.5, shortcut=True, timeout=0.05)
+        solver_config = OMPLSolverConfig(algorithm_range=0.1, shortcut=True, timeout=0.05)
         solver = OMPLSolver(solver_config)
         ret = solver.solve(problem)
         return ret.traj
@@ -415,6 +415,8 @@ class TampSolverCoverLib(TampSolverBase):
         task = JskFridgeReachingTask(world, description)
         problem = task.export_problem()
         ret = self._mp_solver.solve(problem, self._lib.init_solutions[traj_idx])
+        if ret.traj is None:
+            print(f"FF>> {task.to_task_param()}")
         return ret.traj
 
 
