@@ -4,6 +4,7 @@ warnings.filterwarnings("ignore")
 
 import copy
 from dataclasses import dataclass, field
+from itertools import combinations
 from typing import ClassVar, Iterator, List, Optional
 
 import numpy as np
@@ -31,7 +32,7 @@ from skrobot.models import PR2
 from skrobot.viewers import PyrenderViewer
 
 from fd2025.planner.inference import FeasibilityCheckerBatchImageJit
-from fd2025.planner.problem_set import problem_single_object_blocking
+from fd2025.planner.problem_set import problem_single_object_blocking_hard
 
 
 @dataclass
@@ -101,22 +102,33 @@ class TampSolverBase:
         # consider removing single obstacle
         for i in range(len(obstacles)):
             indices_remain = list(set(range(len(obstacles))) - {i})
-            lst_remain = [obstacles[i] for i in indices_remain]
-            is_est_feasible = self.is_feasible(lst_remain, task.description)
+            obstacles_remain = [obstacles[i] for i in indices_remain]
+            is_est_feasible = self.is_feasible(obstacles_remain, task.description)
             if is_est_feasible:
-                return self._plan_obstacle_relocation(task.description, obstacles, indices_remain)
-            print("hypothetical obstacle delete check is not feasible")
+                obstacles_remove = [obstacles[i]]
+                return self._plan_obstacle_relocation(
+                    task.description, obstacles_remove, obstacles_remain
+                )
+
+        # consider removing two obstacles (use heuristic that)
+        for remove_pair in combinations(range(len(obstacles)), 2):
+            indices_remain = list(set(range(len(obstacles))) - set(remove_pair))
+            obstacles_remain = [obstacles[i] for i in indices_remain]
+            is_est_feasible = self.is_feasible(obstacles_remain, task.description)
+            if is_est_feasible:
+                assert False, f"remove_pair: {remove_pair}"
+
         return None
 
     def _plan_obstacle_relocation(
-        self, description: np.ndarray, obstacles: List[CylinderSkelton], indices_remain: List[int]
+        self,
+        description: np.ndarray,
+        obstacles_remove: List[CylinderSkelton],
+        obstacles_remain: List[CylinderSkelton],
     ) -> Optional[TampSolution]:
-        n_obs = len(obstacles)
-        indices_move = list(set(range(n_obs)) - set(indices_remain))
-        assert len(indices_move) == 1  # TODO: support multiple
-        obstacles = copy.deepcopy(obstacles)
-        remove_idx = indices_move[0]
-        obstacle_remove = obstacles[remove_idx]
+
+        obstacles = obstacles_remain + obstacles_remove
+        obstacle_remove = obstacles_remove[0]  # pass obstacles_remove[1:] to recursion
 
         pose_final_reaching_target = description[:4]
         co_final_reaching_target = Coordinates(pose_final_reaching_target[:3])
@@ -128,7 +140,7 @@ class TampSolverBase:
         # 1. Determine how to reach and grasp remove_idx obstacle
         pregrasp_pose = None
         create_heightmap_z_slice(self._region_box, obstacles, 112)
-        for pregrasp_pose_cand in self._sample_possible_pre_grasp_pose(remove_idx, obstacles):
+        for pregrasp_pose_cand in self._sample_possible_pre_grasp_pose(obstacle_remove, obstacles):
             description_tweak = description.copy()
             description_tweak[:4] = pregrasp_pose_cand
             solution_relocation = self.solve_motion_plan(
@@ -137,9 +149,7 @@ class TampSolverBase:
             if solution_relocation is not None:
                 pregrasp_pose = pregrasp_pose_cand
                 q_final = solution_relocation._points[-1]
-                q_grasp = self.solve_grasp_plan(
-                    q_final, remove_idx, obstacles
-                )  # check if graspable
+                q_grasp = self.solve_grasp_plan(q_final, obstacles_remain)
                 if q_grasp is not None:
                     reloc_plan.traj_to_pregrasp = solution_relocation
                     reloc_plan.q_grasp = q_grasp
@@ -149,7 +159,7 @@ class TampSolverBase:
             return None
 
         for relocation_target in self._sample_possible_relocation_target_pose(
-            remove_idx, obstacles, co_final_reaching_target
+            obstacle_remove, obstacles_remain, co_final_reaching_target
         ):
             # 2. post-relocate feasibility check
             obstacle_remove.newcoords(Coordinates(relocation_target))
@@ -159,7 +169,9 @@ class TampSolverBase:
                 continue
             tamp_solution.traj_final_reach = solution_relocation
 
-            for pregrasp_cand_pose in self._sample_possible_pre_grasp_pose(remove_idx, obstacles):
+            for pregrasp_cand_pose in self._sample_possible_pre_grasp_pose(
+                obstacle_remove, obstacles
+            ):
                 # 3. post-relocate final-pregrasp reachability check
                 description_tweak = description.copy()
                 description_tweak[:4] = pregrasp_cand_pose
@@ -170,7 +182,7 @@ class TampSolverBase:
 
                 # 3.1. post-relocate final-grasp check
                 q_grasp = self.solve_grasp_plan(
-                    solution_gohome_reversed._points[-1], remove_idx, obstacles
+                    solution_gohome_reversed._points[-1], obstacles_remain
                 )
                 if q_grasp is None:
                     print("3.1 post relocatoin final grasp is not feasible")
@@ -178,7 +190,7 @@ class TampSolverBase:
 
                 # 4. check relocation plan is feasible
                 solution_relocation = self.solve_relocation_plan(
-                    remove_idx, obstacles, reloc_plan.q_grasp, q_grasp
+                    obstacle_remove, obstacles_remain, reloc_plan.q_grasp, q_grasp
                 )
                 if solution_relocation is None:
                     print("4. relocation motion plan is not feasible")
@@ -193,7 +205,7 @@ class TampSolverBase:
         return None
 
     def _sample_possible_pre_grasp_pose(
-        self, i_pick: int, obstacles: List[CylinderSkelton]
+        self, obstacle_remove: CylinderSkelton, obstacles: List[CylinderSkelton]
     ) -> Iterator[np.ndarray]:
         # ============================================================
         # >> DEPEND ON rpbench JSKFridgeTaskBase.sample_pose() method!!
@@ -208,9 +220,8 @@ class TampSolverBase:
         ub = center + 0.5 * width_effective
         z = 1.07  # the value is fixed for task (check by actually sample task!)
 
-        obstacle = obstacles[i_pick]
-        co_baseline = obstacle.copy_worldcoords()
-        z_offset = z - obstacle.worldpos()[2]
+        co_baseline = obstacle_remove.copy_worldcoords()
+        z_offset = z - obstacle_remove.worldpos()[2]
         co_baseline.translate([0.0, 0.0, z_offset])
         n_max_iter = 10
         for _ in range(n_max_iter):
@@ -232,25 +243,25 @@ class TampSolverBase:
 
     def _sample_possible_relocation_target_pose(
         self,
-        i_pick: int,
-        obstacles: List[CylinderSkelton],
+        obstacle_pick: CylinderSkelton,
+        obstacles_remain: List[CylinderSkelton],
         co_final_reaching_target,
         n_budget: int = 100,
     ) -> Iterator[np.ndarray]:
         center2d = self._region_box.worldpos()[:2]
-        radius = obstacles[i_pick].radius
+        radius = obstacle_pick.radius
         lb = center2d - 0.5 * self._region_box.extents[:2] + radius
         ub = center2d + 0.5 * self._region_box.extents[:2] - radius
-        indices_remain = list(set(range(len(obstacles))) - {i_pick})
-        other_obstacles_pos = np.array([obstacles[i].worldpos()[:2] for i in indices_remain])
-        other_obstacles_radius = np.array([obstacles[i].radius for i in indices_remain])
-        obstacle_pick = obstacles[i_pick]
+        other_obstacles_pos = np.array([obs.worldpos()[:2] for obs in obstacles_remain])
+        other_obstacles_radius = np.array([obs.radius for obs in obstacles_remain])
         pos2d_original = obstacle_pick.worldpos()[:2]
         pos2d_cands = np.random.uniform(lb, ub, (n_budget, 2))
         z = obstacle_pick.worldpos()[2]
         dists_from_original = np.linalg.norm(pos2d_cands - pos2d_original, axis=1)
         # sorted_indices = np.argsort(dists_from_original)
         # pos2d_cands = pos2d_cands[sorted_indices]
+
+        obstacles = obstacles_remain + [obstacle_pick]
 
         for pos2d in pos2d_cands:
             if other_obstacles_pos.size > 0:
@@ -260,7 +271,7 @@ class TampSolverBase:
                 if is_any_collision:
                     continue
             new_obs_co = Coordinates(np.hstack([pos2d, z]))
-            obstacles[i_pick].newcoords(new_obs_co)
+            obstacle_pick.newcoords(new_obs_co)
             if not self.is_valid_target_pose(
                 co_final_reaching_target, obstacles, is_grasping=False
             ):
@@ -268,7 +279,11 @@ class TampSolverBase:
             yield new_obs_co.worldpos()
 
     def solve_relocation_plan(
-        self, i_pick: int, obstacles: List[CylinderSkelton], q_start: np.ndarray, q_goal: np.ndarray
+        self,
+        obstacle_remove,
+        obstacles_remain: List[CylinderSkelton],
+        q_start: np.ndarray,
+        q_goal: np.ndarray,
     ) -> Optional[Trajectory]:
         # compute gripper coords
         model = self._pr2_spec.get_robot_model(deepcopy=False)
@@ -277,20 +292,19 @@ class TampSolverBase:
         assert isinstance(co_gripper_start, Coordinates)
 
         # compute cylinder attachment
-        cylinder_pos = obstacles[i_pick].worldpos()
+        cylinder_pos = obstacle_remove.worldpos()
         relative_pos = co_gripper_start.inverse_transform_vector(cylinder_pos)
         offset = 0.025  # assuming that robot slightly lifted it up
         relative_pos[2] += offset
-        cylinder_pick = obstacles[i_pick]
-        pts = create_cylinder_points(cylinder_pick.height, cylinder_pick.radius, 8) + relative_pos
+        pts = (
+            create_cylinder_points(obstacle_remove.height, obstacle_remove.radius, 8) + relative_pos
+        )
         radii = np.ones(pts.shape[0]) * 0.005
         attachement = SphereAttachmentSpec("l_gripper_tool_frame", pts.T, radii, False)
 
         # setup sdf
         sdf = get_fridge_model_sdf()
-        for i, obstacle in enumerate(obstacles):
-            if i == i_pick:
-                continue
+        for i, obstacle in enumerate(obstacles_remain):
             sdf.add(CylinderSDF(obstacle.radius, obstacle.height, Pose(obstacle.worldpos())))
 
         # setup problem
@@ -310,11 +324,10 @@ class TampSolverBase:
         return ret.traj
 
     def solve_grasp_plan(
-        self, q_now: np.ndarray, i_pick: int, obstacles: List[CylinderSkelton]
+        self, q_now: np.ndarray, obstacles_remain: List[CylinderSkelton]
     ) -> Optional[np.ndarray]:
         # remove taget cylinder from the collision obstacls and check if the reach toward the
         # grasp position is feasible
-        obstacles[i_pick]
         model = self._pr2_spec.get_robot_model(deepcopy=False)
         self._pr2_spec.set_skrobot_model_state(model, q_now)
         self._pr2_spec.reflect_skrobot_model_to_kin(model)
@@ -322,9 +335,7 @@ class TampSolverBase:
         co.translate([self.CYLINDER_PREGRASP_OFFSET, 0.0, 0.0])
 
         sdf = get_fridge_model_sdf()
-        for i, obstacle in enumerate(obstacles):
-            if i == i_pick:
-                continue
+        for i, obstacle in enumerate(obstacles_remain):
             sdf.add(CylinderSDF(obstacle.radius, obstacle.height, Pose(obstacle.worldpos())))
         coll_cst = self._pr2_spec.create_collision_const()
         coll_cst.set_sdf(sdf)
