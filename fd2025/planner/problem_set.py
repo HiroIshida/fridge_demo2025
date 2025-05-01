@@ -24,7 +24,7 @@ def problem_single_object_blocking() -> TampProblem:
     fridge_param = np.array([0.55971283, 0.30126796, 0.42723835, 2.35101264])
     cylinder1 = CylinderSkelton(0.0260, 0.1111)
     cylinder1.translate([0.78746959, 0.31389666, 1.04915313])
-    cylidner2 = CylinderSkelton(0.0320, 0.116)
+    cylidner2 = CylinderSkelton(0.026, 0.116)
     cylidner2.translate([0.73337129, 0.45384931, 1.0517442])
     cylinders = [cylinder1, cylidner2]
     detection = FridgeEnvDetection(fridge_param, cylinders)
@@ -37,7 +37,7 @@ def problem_single_object_blocking_hard() -> TampProblem:
     fridge_param = np.array([0.55971283, 0.30126796, 0.42723835, 2.35101264])
     cylinder1 = CylinderSkelton(0.0260, 0.1111)
     cylinder1.translate([0.78746959, 0.31389666, 1.04915313])
-    cylidner2 = CylinderSkelton(0.0320, 0.116)
+    cylidner2 = CylinderSkelton(0.026, 0.116)
     cylidner2.translate([0.73337129, 0.45384931, 1.0517442])
     cylinders = [cylinder1, cylidner2]
     detection = FridgeEnvDetection(fridge_param, cylinders)
@@ -50,7 +50,7 @@ def problem_single_object_blocking_hard2() -> TampProblem:
     fridge_param = np.array([0.55971283, 0.30126796, 0.42723835, 2.35101264])
     cylinder1 = CylinderSkelton(0.0260, 0.1111)
     cylinder1.translate([0.78746959, 0.31389666, 1.04915313])
-    cylidner2 = CylinderSkelton(0.0320, 0.116)
+    cylidner2 = CylinderSkelton(0.026, 0.116)
     cylidner2.translate([0.73337129, 0.45384931, 1.0517442])
     cylinders = [cylinder1, cylidner2]
     detection = FridgeEnvDetection(fridge_param, cylinders)
@@ -63,7 +63,7 @@ def problem_double_object2_blocking() -> TampProblem:
     fridge_param = np.array([0.55971283, 0.30126796, 0.42723835, 2.35101264])
     cylinder1 = CylinderSkelton(0.0260, 0.1111)
     cylinder1.translate([0.81, 0.34389666, 1.04915313])
-    cylidner2 = CylinderSkelton(0.0320, 0.116)
+    cylidner2 = CylinderSkelton(0.026, 0.116)
     cylidner2.translate([0.75, 0.41384931, 1.0517442])
     cylinders = [cylinder1, cylidner2]
     detection = FridgeEnvDetection(fridge_param, cylinders)
