@@ -1,3 +1,4 @@
+import contextlib
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -33,6 +34,16 @@ from skrobot.viewers import PyrenderViewer
 
 from fd2025.planner.inference import FeasibilityCheckerBatchImageJit
 from fd2025.planner.problem_set import problem_double_object2_blocking
+
+
+@contextlib.contextmanager
+def temp_newcoords(obj, new_co):
+    saved = obj.copy_worldcoords()
+    obj.newcoords(new_co)
+    try:
+        yield
+    finally:
+        obj.newcoords(saved)
 
 
 @dataclass
@@ -171,59 +182,73 @@ class TampSolverBase:
         for relocation_target in self._sample_possible_relocation_target_pose(
             obstacle_remove_here, obstacles_remain, co_final_reaching_target
         ):
-            # 2. post-relocate feasibility check (inherently recursive)
-            obstacle_remove_here.newcoords(Coordinates(relocation_target))
+            with temp_newcoords(obstacle_remove_here, Coordinates(relocation_target)):
+                # 2. post-relocate feasibility check (inherently recursive)
 
-            if len(obstacles_remove) == 1:
-                # The base case of the recursion
-                solution_relocation = self.solve_motion_plan(obstacles, description)
-                if solution_relocation is None:
-                    print("2. (base case) post relocation motion planning is not feasible")
-                    continue
-                tamp_solution.traj_final_reach = solution_relocation
-            else:
-                # The recursive case
-                obstacles_remain_hypo = obstacles_remain + [obstacle_remove_here]
-                is_success = self._plan_obstacle_relocation(
-                    description, obstacles_remove[1:], obstacles_remain_hypo, tamp_solution
-                )
-                if not is_success:
-                    print(f"2. (recursive case) post relocation motion planning is not feasible")
-                    continue
+                if len(obstacles_remove) == 1:
+                    # The base case of the recursion
+                    solution_relocation = self.solve_motion_plan(obstacles, description)
+                    if solution_relocation is None:
+                        print("2. (base case) post relocation motion planning is not feasible")
+                        continue
+                    tamp_solution.traj_final_reach = solution_relocation
+                else:
+                    # The recursive case
 
-            for pregrasp_cand_pose in self._sample_possible_pre_grasp_pose(
-                obstacle_remove_here, obstacles
-            ):
-                # 3. post-relocate final-pregrasp reachability check
-                description_tweak = description.copy()
-                description_tweak[:4] = pregrasp_cand_pose
-                solution_gohome_reversed = self.solve_motion_plan(obstacles, description_tweak)
-                if solution_gohome_reversed is None:
-                    print("3. post relocation motion plan is not feasible")
-                    continue
+                    obstacles_remain_hypo = obstacles_remain + [obstacle_remove_here]
+                    debug_plot_container(
+                        self._region_box.extents[:2],
+                        self._region_box.worldpos()[:2],
+                        obstacles_remove,
+                        obstacles_remain_hypo,
+                        pose_final_reaching_target,
+                    )
+                    plt.show()
 
-                # 3.1. post-relocate final-grasp check
-                q_grasp = self.solve_grasp_plan(
-                    solution_gohome_reversed._points[-1], obstacles_remain
-                )
-                if q_grasp is None:
-                    print("3.1 post relocatoin final grasp is not feasible")
-                    continue
+                    is_success = self._plan_obstacle_relocation(
+                        description, obstacles_remove[1:], obstacles_remain_hypo, tamp_solution
+                    )
 
-                # 4. check relocation plan is feasible
-                solution_relocation = self.solve_relocation_plan(
-                    obstacle_remove_here, obstacles_remain, reloc_plan.q_grasp, q_grasp
-                )
-                if solution_relocation is None:
-                    print("4. relocation motion plan is not feasible")
-                    continue
+                    if not is_success:
+                        print(
+                            f"2. (recursive case) post relocation motion planning is not feasible"
+                        )
+                        continue
+                    print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
-                # OK! now, pack the solutions and return
-                reloc_plan.q_relocate = q_grasp
-                reloc_plan.traj_to_home = solution_gohome_reversed
-                reloc_plan.traj_grasp_to_relocate = solution_relocation
-                tamp_solution.relocation_seq.append(reloc_plan)
-                return True
+                for pregrasp_cand_pose in self._sample_possible_pre_grasp_pose(
+                    obstacle_remove_here, obstacles
+                ):
+                    # 3. post-relocate final-pregrasp reachability check
+                    description_tweak = description.copy()
+                    description_tweak[:4] = pregrasp_cand_pose
+                    solution_gohome_reversed = self.solve_motion_plan(obstacles, description_tweak)
+                    if solution_gohome_reversed is None:
+                        print("3. post relocation motion plan is not feasible")
+                        continue
+
+                    # 3.1. post-relocate final-grasp check
+                    q_grasp = self.solve_grasp_plan(
+                        solution_gohome_reversed._points[-1], obstacles_remain
+                    )
+                    if q_grasp is None:
+                        print("3.1 post relocatoin final grasp is not feasible")
+                        continue
+
+                    # 4. check relocation plan is feasible
+                    solution_relocation = self.solve_relocation_plan(
+                        obstacle_remove_here, obstacles_remain, reloc_plan.q_grasp, q_grasp
+                    )
+                    if solution_relocation is None:
+                        print("4. relocation motion plan is not feasible")
+                        continue
+
+                    # OK! now, pack the solutions and return
+                    reloc_plan.q_relocate = q_grasp
+                    reloc_plan.traj_to_home = solution_gohome_reversed
+                    reloc_plan.traj_grasp_to_relocate = solution_relocation
+                    tamp_solution.relocation_seq.append(reloc_plan)
+                    return True
         return False
 
     def _sample_possible_pre_grasp_pose(
