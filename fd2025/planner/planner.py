@@ -211,9 +211,20 @@ class TampSolverBase:
             print("1. not found good pre-grasp pose for remove_idx")
             return False
 
+        obstacles_remove_later = obstacles_remove[1:]
         for relocation_target in self._sample_possible_relocation_target_pose(
-            obstacle_remove_here, obstacles_remain, co_final_reaching_target
+            obstacle_remove_here, obstacles_remove_later, obstacles_remain, co_final_reaching_target
         ):
+
+            # check relocation target is valid
+            if len(obstacles_remove_later) > 0:
+                cylinder = obstacles_remove_later[0]
+                pos, r = cylinder.worldpos()[:2], cylinder.radius
+                r_this = obstacle_remove_here.radius
+                pos_target = relocation_target[:2]
+                dist = np.linalg.norm(pos - pos_target)
+                assert dist >= r + r_this, "relocation target is not valid"
+
             with temp_newcoords(obstacle_remove_here, Coordinates(relocation_target)):
                 # 2. post-relocate feasibility check (inherently recursive)
 
@@ -226,19 +237,18 @@ class TampSolverBase:
                     tamp_solution.traj_final_reach = solution_relocation
                 else:
                     # The recursive case
-
                     obstacles_remain_hypo = obstacles_remain + [obstacle_remove_here]
-                    debug_plot_container(
-                        self._region_box.extents[:2],
-                        self._region_box.worldpos()[:2],
-                        obstacles_remove,
-                        obstacles_remain_hypo,
-                        pose_final_reaching_target,
-                    )
-                    plt.show()
+                    # debug_plot_container(
+                    #     self._region_box.extents[:2],
+                    #     self._region_box.worldpos()[:2],
+                    #     obstacles_remove,
+                    #     obstacles_remain_hypo,
+                    #     pose_final_reaching_target,
+                    # )
+                    # plt.show()
 
                     is_success = self._plan_obstacle_relocation(
-                        description, obstacles_remove[1:], obstacles_remain_hypo, tamp_solution
+                        description, obstacles_remove_later, obstacles_remain_hypo, tamp_solution
                     )
 
                     if not is_success:
@@ -323,6 +333,7 @@ class TampSolverBase:
     def _sample_possible_relocation_target_pose(
         self,
         obstacle_pick: CylinderSkelton,
+        obstacles_remove_later: List[CylinderSkelton],
         obstacles_remain: List[CylinderSkelton],
         co_final_reaching_target,
         n_budget: int = 100,
@@ -331,8 +342,11 @@ class TampSolverBase:
         radius = obstacle_pick.radius
         lb = center2d - 0.5 * self._region_box.extents[:2] + radius
         ub = center2d + 0.5 * self._region_box.extents[:2] - radius
-        other_obstacles_pos = np.array([obs.worldpos()[:2] for obs in obstacles_remain])
-        other_obstacles_radius = np.array([obs.radius for obs in obstacles_remain])
+
+        # NOTE: obstacles_fixed for checking collision between rellocation target and other
+        obstacles_fixed = obstacles_remove_later + obstacles_remain
+        other_obstacles_pos = np.array([obs.worldpos()[:2] for obs in obstacles_fixed])
+        other_obstacles_radius = np.array([obs.radius for obs in obstacles_fixed])
         pos2d_original = obstacle_pick.worldpos()[:2]
         pos2d_cands = np.random.uniform(lb, ub, (n_budget, 2))
         z = obstacle_pick.worldpos()[2]
@@ -340,7 +354,10 @@ class TampSolverBase:
         # sorted_indices = np.argsort(dists_from_original)
         # pos2d_cands = pos2d_cands[sorted_indices]
 
-        obstacles = obstacles_remain + [obstacle_pick]
+        # NOTE: obstacles_to_check for confirming that at least with this rellocation
+        # except for future relocation, the target pose is valid.
+        # So obstacles_remove_later is not included in the check.
+        obstacles_to_check = [obstacle_pick] + obstacles_remain
 
         for pos2d in pos2d_cands:
             if other_obstacles_pos.size > 0:
@@ -350,11 +367,11 @@ class TampSolverBase:
                 if is_any_collision:
                     continue
             new_obs_co = Coordinates(np.hstack([pos2d, z]))
-            obstacle_pick.newcoords(new_obs_co)
-            if not self.is_valid_target_pose(
-                co_final_reaching_target, obstacles, is_grasping=False
-            ):
-                continue
+            with temp_newcoords(obstacle_pick, new_obs_co):
+                if not self.is_valid_target_pose(
+                    co_final_reaching_target, obstacles_to_check, is_grasping=False
+                ):
+                    continue
             yield new_obs_co.worldpos()
 
     def solve_relocation_plan(
