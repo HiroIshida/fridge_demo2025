@@ -4,10 +4,10 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
 from itertools import combinations
-from typing import ClassVar, Iterator, List, Optional, Tuple
+from typing import ClassVar, Iterator, List, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -36,7 +36,7 @@ from skrobot.models import PR2
 from skrobot.viewers import PyrenderViewer
 
 from fd2025.planner.inference import FeasibilityCheckerBatchImageJit
-from fd2025.planner.problem_set import problem_double_object2_blocking
+from fd2025.planner.problem_set import problem_single_object_blocking
 
 
 def debug_plot_container(
@@ -80,17 +80,15 @@ def temp_newcoords(obj, new_co):
 
 
 @dataclass
-class TampSolution:
-    @dataclass
-    class RelocationPlan:
-        traj_to_pregrasp: Optional[Trajectory] = None  # home -> pregrasp
-        q_grasp: Optional[np.ndarray] = None
-        traj_grasp_to_relocate: Optional[Trajectory] = None  # pregrasp -> q_relocate
-        q_relocate: Optional[np.ndarray] = None
-        traj_to_home: Optional[Trajectory] = None  # q_relocate -> home
+class RelocationPlan:
+    traj_to_pregrasp: Optional[Trajectory] = None  # home -> pregrasp
+    q_grasp: Optional[np.ndarray] = None
+    traj_grasp_to_relocate: Optional[Trajectory] = None  # pregrasp -> q_relocate
+    q_relocate: Optional[np.ndarray] = None
+    traj_to_home: Optional[Trajectory] = None  # q_relocate -> home
 
-    traj_final_reach: Optional[Trajectory] = None
-    relocation_seq: List[RelocationPlan] = field(default_factory=list)
+
+TampSolution = List[Union[Trajectory, RelocationPlan]]
 
 
 class RelocationPlanningStage(Enum):
@@ -129,6 +127,7 @@ class TampSolverBase:
             print(something)
 
     def solve(self, task_param: np.ndarray) -> Optional[TampSolution]:
+
         task_init = JskFridgeReachingTask.from_task_param(task_param)
 
         target_pose, base_pose = task_init.description[:4], task_init.description[4:7]
@@ -165,7 +164,6 @@ class TampSolverBase:
         self.reloc_stage_history = []  # reset
 
         obstacles = task.world.get_obstacle_list()
-        tamp_solution = TampSolution()
 
         # consider removing single obstacle
         for i in range(len(obstacles)):
@@ -174,11 +172,9 @@ class TampSolverBase:
             is_est_feasible = self.is_feasible(obstacles_remain, task.description)
             if is_est_feasible:
                 obstacles_remove = [obstacles[i]]
-                is_success = self._plan_obstacle_relocation(
-                    task.description, obstacles_remove, obstacles_remain, tamp_solution
+                return self._plan_obstacle_relocation(
+                    task.description, obstacles_remove, obstacles_remain
                 )
-                if is_success:
-                    return tamp_solution
 
         # consider removing two obstacles (use heuristic that)
         for remove_pair in combinations(range(len(obstacles)), 2):
@@ -187,12 +183,12 @@ class TampSolverBase:
             is_est_feasible = self.is_feasible(obstacles_remain, task.description)
             if is_est_feasible:
                 obstacles_remove = [obstacles[i] for i in remove_pair]
-                is_success = self._plan_obstacle_relocation(
-                    task.description, obstacles_remove, obstacles_remain, tamp_solution
+                return self._plan_obstacle_relocation(
+                    task.description, obstacles_remove, obstacles_remain
                 )
-                if is_success:
-                    return tamp_solution
 
+        # FIXME: currently, we do not consider removing more than two obstacles
+        # TODO: consider removing arbitrary number of obstacles
         return None
 
     def _plan_obstacle_relocation(
@@ -200,8 +196,7 @@ class TampSolverBase:
         description: np.ndarray,
         obstacles_remove: List[CylinderSkelton],
         obstacles_remain: List[CylinderSkelton],
-        tamp_solution: TampSolution,
-    ) -> bool:
+    ) -> Optional[TampSolution]:
 
         obstacles = obstacles_remain + obstacles_remove
         obstacle_remove_here = obstacles_remove[0]  # pass obstacles_remove[1:] to recursion
@@ -210,7 +205,9 @@ class TampSolverBase:
         co_final_reaching_target = Coordinates(pose_final_reaching_target[:3])
         co_final_reaching_target.rotate(pose_final_reaching_target[3], "z")
 
-        reloc_plan = TampSolution.RelocationPlan()
+        # prepare solution container
+        reloc_plan = RelocationPlan()
+        post_relocation_plan: Optional[TampSolution] = None
 
         # 1. Determine how to reach and grasp remove_idx obstacle
         pregrasp_pose = None
@@ -233,7 +230,7 @@ class TampSolverBase:
                     break
         if pregrasp_pose is None:
             self.print("1. not found good pre-grasp pose for remove_idx")
-            return False
+            return None
 
         obstacles_remove_later = obstacles_remove[1:]
         for relocation_target in self._sample_possible_relocation_target_pose(
@@ -253,29 +250,19 @@ class TampSolverBase:
                 # 2. post-relocate feasibility check (inherently recursive)
 
                 if len(obstacles_remove) == 1:
-                    # The base case of the recursion
-                    solution_relocation = self.solve_motion_plan(obstacles, description)
-                    if solution_relocation is None:
+                    # The base case of the recursion (final reach)
+                    traj_final_reach = self.solve_motion_plan(obstacles, description)
+                    if traj_final_reach is None:
                         self.print("2. (base case) post relocation motion planning is not feasible")
                         continue
-                    tamp_solution.traj_final_reach = solution_relocation
+                    post_relocation_plan = [traj_final_reach]
                 else:
                     # The recursive case
                     obstacles_remain_hypo = obstacles_remain + [obstacle_remove_here]
-                    # debug_plot_container(
-                    #     self._region_box.extents[:2],
-                    #     self._region_box.worldpos()[:2],
-                    #     obstacles_remove,
-                    #     obstacles_remain_hypo,
-                    #     pose_final_reaching_target,
-                    # )
-                    # plt.show()
-
-                    is_success = self._plan_obstacle_relocation(
-                        description, obstacles_remove_later, obstacles_remain_hypo, tamp_solution
+                    post_relocation_plan = self._plan_obstacle_relocation(
+                        description, obstacles_remove_later, obstacles_remain_hypo
                     )
-
-                    if not is_success:
+                    if post_relocation_plan is None:
                         self.print(
                             f"2. (recursive case) post relocation motion planning is not feasible"
                         )
@@ -312,9 +299,11 @@ class TampSolverBase:
                     reloc_plan.q_relocate = q_grasp
                     reloc_plan.traj_to_home = solution_gohome_reversed
                     reloc_plan.traj_grasp_to_relocate = solution_relocation
-                    tamp_solution.relocation_seq.append(reloc_plan)
-                    return True
-        return False
+
+                    assert isinstance(post_relocation_plan, list)
+                    subproblem_solution = post_relocation_plan + [reloc_plan]
+                    return subproblem_solution
+        return None
 
     def _sample_possible_pre_grasp_pose(
         self, obstacle_remove: CylinderSkelton, obstacles: List[CylinderSkelton]
@@ -571,11 +560,12 @@ class TampSolverNaive(TampSolverBase):
 
 
 if __name__ == "__main__":
-    np_seed = 3
+    np_seed = 0
     np.random.seed(np_seed)
     set_random_seed(0)
+    tamp_problem = problem_single_object_blocking()
     # tamp_problem = problem_single_object_blocking_hard()
-    tamp_problem = problem_double_object2_blocking()
+    # tamp_problem = problem_double_object2_blocking()
     task_param = tamp_problem.to_param()
 
     task = JskFridgeReachingTask.from_task_param(task_param)
@@ -594,6 +584,7 @@ if __name__ == "__main__":
     import pickle
 
     print(ret)
+    print(f"length of solution: {len(ret)}")
 
     hash_value = hashlib.sha256(pickle.dumps(ret)).hexdigest()
     print(f"hash_value: {hash_value}")
@@ -618,7 +609,7 @@ if __name__ == "__main__":
         import time
 
         # replay relocation trajectory
-        for reloc_plan in ret.relocation_seq:
+        for reloc_plan in ret.relocation_seq[-1:]:
             print("reach to obstacle")
             for q in reloc_plan.traj_to_pregrasp.resample(100):
                 spec.set_skrobot_model_state(pr2, q)
