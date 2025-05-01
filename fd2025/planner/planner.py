@@ -351,8 +351,8 @@ class TampSolverBase:
         pos2d_cands = np.random.uniform(lb, ub, (n_budget, 2))
         z = obstacle_pick.worldpos()[2]
         dists_from_original = np.linalg.norm(pos2d_cands - pos2d_original, axis=1)
-        # sorted_indices = np.argsort(dists_from_original)
-        # pos2d_cands = pos2d_cands[sorted_indices]
+        sorted_indices = np.argsort(dists_from_original)
+        pos2d_cands = pos2d_cands[sorted_indices]
 
         # NOTE: obstacles_to_check for confirming that at least with this rellocation
         # except for future relocation, the target pose is valid.
