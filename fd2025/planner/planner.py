@@ -105,6 +105,14 @@ class TampSolverBase:
         pr2.angle_vector(AV_INIT)
         self._pr2_spec.reflect_kin_to_skrobot_model(pr2)
 
+        # others
+        self.statistics = dict()
+        self.verbose = False
+
+    def print(self, something):
+        if self.verbose:
+            print(something)
+
     def solve(self, task_param: np.ndarray) -> Optional[TampSolution]:
         task_init = JskFridgeReachingTask.from_task_param(task_param)
 
@@ -129,9 +137,9 @@ class TampSolverBase:
         co.rotate(task_init.description[3], "z")
         obstacle_list = task_init.world.get_obstacle_list()
         if self.is_valid_target_pose(co, obstacle_list, is_grasping=False):
-            print("valid target pose without any replacement")
+            self.print("valid target pose without any replacement")
             if self.is_feasible(obstacle_list, task_init.description):
-                print("solvable without any replacement")
+                self.print("solvable without any replacement")
                 assert False, "unmaintained branch"
 
         return self._hypothetical_obstacle_delete_check(task_init)
@@ -208,7 +216,7 @@ class TampSolverBase:
                     reloc_plan.q_grasp = q_grasp
                     break
         if pregrasp_pose is None:
-            print("1. not found good pre-grasp pose for remove_idx")
+            self.print("1. not found good pre-grasp pose for remove_idx")
             return False
 
         obstacles_remove_later = obstacles_remove[1:]
@@ -232,7 +240,7 @@ class TampSolverBase:
                     # The base case of the recursion
                     solution_relocation = self.solve_motion_plan(obstacles, description)
                     if solution_relocation is None:
-                        print("2. (base case) post relocation motion planning is not feasible")
+                        self.print("2. (base case) post relocation motion planning is not feasible")
                         continue
                     tamp_solution.traj_final_reach = solution_relocation
                 else:
@@ -252,11 +260,10 @@ class TampSolverBase:
                     )
 
                     if not is_success:
-                        print(
+                        self.print(
                             f"2. (recursive case) post relocation motion planning is not feasible"
                         )
                         continue
-                    print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
                 for pregrasp_cand_pose in self._sample_possible_pre_grasp_pose(
                     obstacle_remove_here, obstacles
@@ -266,7 +273,7 @@ class TampSolverBase:
                     description_tweak[:4] = pregrasp_cand_pose
                     solution_gohome_reversed = self.solve_motion_plan(obstacles, description_tweak)
                     if solution_gohome_reversed is None:
-                        print("3. post relocation motion plan is not feasible")
+                        self.print("3. post relocation motion plan is not feasible")
                         continue
 
                     # 3.1. post-relocate final-grasp check
@@ -274,7 +281,7 @@ class TampSolverBase:
                         solution_gohome_reversed._points[-1], obstacles_remain
                     )
                     if q_grasp is None:
-                        print("3.1 post relocatoin final grasp is not feasible")
+                        self.print("3.1 post relocatoin final grasp is not feasible")
                         continue
 
                     # 4. check relocation plan is feasible
@@ -282,7 +289,7 @@ class TampSolverBase:
                         obstacle_remove_here, obstacles_remain, reloc_plan.q_grasp, q_grasp
                     )
                     if solution_relocation is None:
-                        print("4. relocation motion plan is not feasible")
+                        self.print("4. relocation motion plan is not feasible")
                         continue
 
                     # OK! now, pack the solutions and return
@@ -513,7 +520,7 @@ class TampSolverCoverLib(TampSolverBase):
         hmap_current = create_heightmap_z_slice(self._region_box, obstacles, 112)
         feasible, traj_idx = self._checker_single.infer_single(description, hmap_current)
         if not feasible:
-            print("inference engine expected that the motion plan is not feasible!")
+            self.print("inference engine expected that the motion plan is not feasible!")
             return None
 
         obstacles_param = self.obstacles_to_obstacles_param(obstacles, self._region_box)
@@ -522,7 +529,7 @@ class TampSolverCoverLib(TampSolverBase):
         problem = task.export_problem()
         ret = self._mp_solver.solve(problem, self._lib.init_solutions[traj_idx])
         if ret.traj is None:
-            print(f"FF>> {task.to_task_param()}")
+            self.print(f"FF>> {task.to_task_param()}")
         return ret.traj
 
 
