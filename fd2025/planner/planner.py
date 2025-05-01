@@ -6,11 +6,13 @@ warnings.filterwarnings("ignore")
 import copy
 from dataclasses import dataclass, field
 from itertools import combinations
-from typing import ClassVar, Iterator, List, Optional
+from typing import ClassVar, Iterator, List, Optional, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 from hifuku.domain import JSKFridge
 from hifuku.script_utils import load_library
+from matplotlib.patches import Circle, Rectangle
 from plainmp.constraint import SphereAttachmentSpec
 from plainmp.ik import solve_ik
 from plainmp.ompl_solver import OMPLSolver, OMPLSolverConfig, set_random_seed
@@ -34,6 +36,36 @@ from skrobot.viewers import PyrenderViewer
 
 from fd2025.planner.inference import FeasibilityCheckerBatchImageJit
 from fd2025.planner.problem_set import problem_double_object2_blocking
+
+
+def debug_plot_container(
+    container_size: Tuple[float, float],
+    container_pos: Tuple[float, float],
+    obstacles_remove: List[CylinderSkelton],
+    obstacles_remain: List[CylinderSkelton],
+    target: np.ndarray,  #  [x, y, z, yaw]
+) -> plt.Figure:
+    fig, ax = plt.subplots()
+    cx, cy = container_pos
+    w, h = container_size
+    ax.add_patch(
+        Rectangle((cx - 0.5 * w, cy - 0.5 * h), w, h, fill=False, edgecolor="black", linewidth=2)
+    )
+    for cyl in obstacles_remove:
+        px, py, _ = cyl.worldpos()
+        ax.add_patch(Circle((px, py), cyl.radius, fill=False, edgecolor="blue", linewidth=1.5))
+    for cyl in obstacles_remain:
+        px, py, _ = cyl.worldpos()
+        ax.add_patch(Circle((px, py), cyl.radius, fill=True, alpha=0.5))
+    x, y, _, yaw = target
+    dx, dy = np.cos(yaw) * 0.1, np.sin(yaw) * 0.1
+    ax.arrow(x, y, dx, dy, head_width=0.01, length_includes_head=True, color="r")
+    ax.arrow(x, y, -dy, dx, head_width=0.01, length_includes_head=True, color="g")
+    ax.set_aspect("equal")
+    eps = 0.1
+    ax.set_xlim(cx - 0.5 * w - eps, cx + 0.5 * w + eps)
+    ax.set_ylim(cy - 0.5 * h - eps, cy + 0.5 * h + eps)
+    return fig
 
 
 @contextlib.contextmanager
