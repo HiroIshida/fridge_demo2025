@@ -32,7 +32,7 @@ from skrobot.models import PR2
 from skrobot.viewers import PyrenderViewer
 
 from fd2025.planner.inference import FeasibilityCheckerBatchImageJit
-from fd2025.planner.problem_set import problem_single_object_blocking_hard
+from fd2025.planner.problem_set import problem_double_object2_blocking
 
 
 @dataclass
@@ -116,7 +116,10 @@ class TampSolverBase:
             obstacles_remain = [obstacles[i] for i in indices_remain]
             is_est_feasible = self.is_feasible(obstacles_remain, task.description)
             if is_est_feasible:
-                assert False, f"remove_pair: {remove_pair}"
+                obstacles_remove = [obstacles[i] for i in remove_pair]
+                return self._plan_obstacle_relocation(
+                    task.description, obstacles_remove, obstacles_remain
+                )
 
         return None
 
@@ -128,7 +131,7 @@ class TampSolverBase:
     ) -> Optional[TampSolution]:
 
         obstacles = obstacles_remain + obstacles_remove
-        obstacle_remove = obstacles_remove[0]  # pass obstacles_remove[1:] to recursion
+        obstacle_remove_here = obstacles_remove[0]  # pass obstacles_remove[1:] to recursion
 
         pose_final_reaching_target = description[:4]
         co_final_reaching_target = Coordinates(pose_final_reaching_target[:3])
@@ -140,7 +143,9 @@ class TampSolverBase:
         # 1. Determine how to reach and grasp remove_idx obstacle
         pregrasp_pose = None
         create_heightmap_z_slice(self._region_box, obstacles, 112)
-        for pregrasp_pose_cand in self._sample_possible_pre_grasp_pose(obstacle_remove, obstacles):
+        for pregrasp_pose_cand in self._sample_possible_pre_grasp_pose(
+            obstacle_remove_here, obstacles
+        ):
             description_tweak = description.copy()
             description_tweak[:4] = pregrasp_pose_cand
             solution_relocation = self.solve_motion_plan(
@@ -159,18 +164,27 @@ class TampSolverBase:
             return None
 
         for relocation_target in self._sample_possible_relocation_target_pose(
-            obstacle_remove, obstacles_remain, co_final_reaching_target
+            obstacle_remove_here, obstacles_remain, co_final_reaching_target
         ):
-            # 2. post-relocate feasibility check
-            obstacle_remove.newcoords(Coordinates(relocation_target))
-            solution_relocation = self.solve_motion_plan(obstacles, description)
-            if solution_relocation is None:
-                print("2. post relocation motion planning is not feasible")
-                continue
-            tamp_solution.traj_final_reach = solution_relocation
+            # 2. post-relocate feasibility check (inherently recursive)
+            obstacle_remove_here.newcoords(Coordinates(relocation_target))
+
+            if len(obstacles_remove) == 1:
+                # The base case of the recursion
+                solution_relocation = self.solve_motion_plan(obstacles, description)
+                if solution_relocation is None:
+                    print("2. post relocation motion planning is not feasible")
+                    continue
+                tamp_solution.traj_final_reach = solution_relocation
+            else:
+                # The recursive case
+                obstacles_remain_hypo = obstacles_remain + [obstacle_remove_here]
+                self._plan_obstacle_relocation(
+                    description, obstacles_remove[1:], obstacles_remain_hypo
+                )
 
             for pregrasp_cand_pose in self._sample_possible_pre_grasp_pose(
-                obstacle_remove, obstacles
+                obstacle_remove_here, obstacles
             ):
                 # 3. post-relocate final-pregrasp reachability check
                 description_tweak = description.copy()
@@ -190,7 +204,7 @@ class TampSolverBase:
 
                 # 4. check relocation plan is feasible
                 solution_relocation = self.solve_relocation_plan(
-                    obstacle_remove, obstacles_remain, reloc_plan.q_grasp, q_grasp
+                    obstacle_remove_here, obstacles_remain, reloc_plan.q_grasp, q_grasp
                 )
                 if solution_relocation is None:
                     print("4. relocation motion plan is not feasible")
@@ -452,10 +466,11 @@ class TampSolverNaive(TampSolverBase):
 
 
 if __name__ == "__main__":
-    np_seed = 0
+    np_seed = 3
     np.random.seed(np_seed)
     set_random_seed(0)
-    tamp_problem = problem_single_object_blocking()
+    # tamp_problem = problem_single_object_blocking_hard()
+    tamp_problem = problem_double_object2_blocking()
     task_param = tamp_problem.to_param()
 
     task = JskFridgeReachingTask.from_task_param(task_param)
@@ -463,6 +478,7 @@ if __name__ == "__main__":
     # solver = TampSolverNaive(timeout=0.3)
 
     from pyinstrument import Profiler
+
     profiler = Profiler()
     profiler.start()
     ret = solver.solve(task_param)
