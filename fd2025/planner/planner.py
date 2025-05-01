@@ -5,6 +5,7 @@ warnings.filterwarnings("ignore")
 
 import copy
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from itertools import combinations
 from typing import ClassVar, Iterator, List, Optional, Tuple
 
@@ -92,6 +93,18 @@ class TampSolution:
     relocation_seq: List[RelocationPlan] = field(default_factory=list)
 
 
+class RelocationPlanningStage(Enum):
+    # assuming that relocate obstacle from A to B
+    # stages for starting each planning (not finish them)
+    MP_PREGRASP_A = auto()
+    IK_GRASP_A = auto()
+    MP_FINAL_REACh = auto()
+    MP_PREGRASP_B = auto()
+    IK_GRASP_B = auto()
+    MP_RELOCATE = auto()
+    SUCCESS = auto()
+
+
 class TampSolverBase:
     CYLINDER_PREGRASP_OFFSET: ClassVar[float] = 0.06
 
@@ -106,7 +119,9 @@ class TampSolverBase:
         self._pr2_spec.reflect_kin_to_skrobot_model(pr2)
 
         # others
-        self.statistics = dict()
+        self.reloc_stage_history: List[
+            Tuple[int, RelocationPlanningStage]
+        ] = []  # int for recursion depth
         self.verbose = False
 
     def print(self, something):
@@ -147,6 +162,7 @@ class TampSolverBase:
     def _hypothetical_obstacle_delete_check(
         self, task: JskFridgeReachingTask
     ) -> Optional[TampSolution]:
+        self.reloc_stage_history = []  # reset
 
         obstacles = task.world.get_obstacle_list()
         tamp_solution = TampSolution()
