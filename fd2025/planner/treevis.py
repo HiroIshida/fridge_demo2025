@@ -1,5 +1,5 @@
 import random
-from typing import Optional
+from typing import List, Optional
 from uuid import uuid4
 
 from graphviz import Digraph
@@ -7,24 +7,67 @@ from graphviz import Digraph
 
 class VisNode:
     def __init__(self, name: Optional[str] = None, color="white"):
-        if name is None:
-            name = str(uuid4())[-8:]
-        self.name = name
+        self.name = name or str(uuid4())[-8:]
         self.color = color
-        self.children = []
+        self.children: List["VisNode"] = []
 
     def add_child(self, child: "VisNode"):
         self.children.append(child)
 
 
-def visualize_tree(filename: str, root_node: VisNode):
-    dot = Digraph(comment="Tree", engine="dot")
-    dot.attr("node", style="filled", fontcolor="black")
-    dot.attr("edge", color="gray")
+def visualize_tree(
+    filename: str,
+    root_node: VisNode,
+    n_threshold: int = 5,
+    engine: str = "dot",
+):
+    dot = Digraph(comment="Tree", engine=engine)
+    dot.attr(
+        "node",
+        style="filled",
+        fontcolor="black",
+        shape="circle",
+        fixedsize="true",
+        width="0.2",
+        height="0.2",
+        label="",
+    )
+    dot.attr("edge", color="black")
+    dot.attr("graph", repulsiveforce="8.0", K="0.1")
 
     def add_edges(node: VisNode):
         dot.node(node.name, fillcolor=node.color)
-        for child in node.children:
+
+        leaf_children = [c for c in node.children if not c.children]
+        branch_children = [c for c in node.children if c.children]
+
+        if len(leaf_children) > n_threshold:
+            for child in leaf_children[:n_threshold]:
+                dot.edge(node.name, child.name)
+                dot.node(child.name, fillcolor=child.color)
+
+            remain = len(leaf_children) - n_threshold
+            group_name = f"{node.name}_plus_{remain}"
+            group_label = f"+{remain}"
+            group_color = leaf_children[0].color  # NOTE: all leaves should have the same color
+            dot.node(
+                group_name,
+                label=group_label,
+                shape="box",
+                fillcolor=group_color,
+                fontcolor="black",
+                fixedsize="false",
+                width="0.6",
+                height="0.25",
+                margin="0.04,0.02",
+            )
+            dot.edge(node.name, group_name)
+        else:
+            for child in leaf_children:
+                dot.edge(node.name, child.name)
+                dot.node(child.name, fillcolor=child.color)
+
+        for child in branch_children:
             dot.edge(node.name, child.name)
             add_edges(child)
 
