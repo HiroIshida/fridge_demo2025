@@ -38,8 +38,10 @@ from skrobot.viewers import PyrenderViewer
 from fd2025.planner.inference import FeasibilityCheckerBatchImageJit
 from fd2025.planner.problem_set import (
     problem_double_object2_blocking,
-    problem_single_object_blocking,
+    problem_single_object_blocking_hard,
+    problem_single_object_blocking_hard2,
 )
+from fd2025.planner.treevis import VisNode, visualize_tree
 
 
 def debug_plot_container(
@@ -53,7 +55,7 @@ def debug_plot_container(
     cx, cy = container_pos
     w, h = container_size
     ax.add_patch(
-        Rectangle((cx - 0.5 * w, cy - 0.5 * h), w, h, fill=False, edgecolor="black", linewidth=2)
+        Rectangle((cx - 0.5 * w, cy - 0.5 * h), w, h, fill=False, edgecolor="gray", linewidth=2)
     )
     for cyl in obstacles_remove:
         px, py, _ = cyl.worldpos()
@@ -168,6 +170,7 @@ class TampSolverBase:
         self.reloc_stage_history = []  # reset
 
         obstacles = task.world.get_obstacle_list()
+        self.root_node = VisNode("root", color="gray")  # for debugging
 
         # consider removing single obstacle
         for i in range(len(obstacles)):
@@ -177,8 +180,8 @@ class TampSolverBase:
             if is_est_feasible:
                 obstacles_remove = [obstacles[i]]
                 return self._plan_obstacle_relocation(
-                    task.description, obstacles_remove, obstacles_remain, 0
-                )
+                    task.description, obstacles_remove, obstacles_remain, 0, self.root_node
+                )[0]
 
         # consider removing two obstacles (use heuristic that)
         for remove_pair in combinations(range(len(obstacles)), 2):
@@ -188,8 +191,8 @@ class TampSolverBase:
             if is_est_feasible:
                 obstacles_remove = [obstacles[i] for i in remove_pair]
                 return self._plan_obstacle_relocation(
-                    task.description, obstacles_remove, obstacles_remain, 0
-                )
+                    task.description, obstacles_remove, obstacles_remain, 0, self.root_node
+                )[0]
 
         # FIXME: currently, we do not consider removing more than two obstacles
         # TODO: consider removing arbitrary number of obstacles
@@ -201,7 +204,8 @@ class TampSolverBase:
         obstacles_remove: List[CylinderSkelton],
         obstacles_remain: List[CylinderSkelton],
         depth: int,
-    ) -> Optional[TampSolution]:
+        root_node: VisNode,
+    ) -> Optional[Tuple[TampSolution, VisNode]]:
         self.reloc_stage_history.append((depth, RelocationPlanningStage.START))
 
         obstacles = obstacles_remain + obstacles_remove
@@ -217,10 +221,14 @@ class TampSolverBase:
 
         # 1. Determine how to reach and grasp remove_idx obstacle
         pregrasp_pose = None
+        node_ik_grasp_a = None
         create_heightmap_z_slice(self._region_box, obstacles, 112)
         for pregrasp_pose_cand in self._sample_possible_pre_grasp_pose(
             obstacle_remove_here, obstacles
         ):
+            node_mp_pregrasp_a = VisNode(color="red")
+            root_node.add_child(node_mp_pregrasp_a)
+
             self.reloc_stage_history.append((depth, RelocationPlanningStage.MP_PREGRASP_A))
             description_tweak = description.copy()
             description_tweak[:4] = pregrasp_pose_cand
@@ -228,6 +236,9 @@ class TampSolverBase:
                 obstacles, description_tweak
             )  # check if reachable
             if solution_relocation is not None:
+                node_ik_grasp_a = VisNode()
+                node_mp_pregrasp_a.add_child(node_ik_grasp_a)
+
                 self.reloc_stage_history.append((depth, RelocationPlanningStage.IK_GRASP_A))
                 pregrasp_pose = pregrasp_pose_cand
                 q_final = solution_relocation._points[-1]
@@ -239,6 +250,7 @@ class TampSolverBase:
         if pregrasp_pose is None:
             self.print("1. not found good pre-grasp pose for remove_idx")
             return None
+        assert isinstance(node_ik_grasp_a, VisNode)
 
         obstacles_remove_later = obstacles_remove[1:]
         for relocation_target in self._sample_possible_relocation_target_pose(
@@ -247,30 +259,45 @@ class TampSolverBase:
             with temp_newcoords(obstacle_remove_here, Coordinates(relocation_target)):
                 # 2. post-relocate feasibility check (inherently recursive)
 
+                node_post_relocate_plan: Optional[VisNode] = None
+
                 if len(obstacles_remove) == 1:
                     # The base case of the recursion (final reach)
+                    node_mp_final_reach = VisNode(color="red")
+                    node_ik_grasp_a.add_child(node_mp_final_reach)
+
                     self.reloc_stage_history.append((depth, RelocationPlanningStage.MP_FINAL_REACh))
                     traj_final_reach = self.solve_motion_plan(obstacles, description)
                     if traj_final_reach is None:
                         self.print("2. (base case) post relocation motion planning is not feasible")
                         continue
                     post_relocation_plan = [traj_final_reach]
+                    node_post_relocate_plan = node_mp_final_reach
                 else:
                     # The recursive case
                     obstacles_remain_hypo = obstacles_remain + [obstacle_remove_here]
-                    post_relocation_plan = self._plan_obstacle_relocation(
-                        description, obstacles_remove_later, obstacles_remain_hypo, depth + 1
+                    ret = self._plan_obstacle_relocation(
+                        description,
+                        obstacles_remove_later,
+                        obstacles_remain_hypo,
+                        depth + 1,
+                        node_ik_grasp_a,
                     )
-                    if post_relocation_plan is None:
+                    if ret is None:
                         self.print(
                             f"2. (recursive case) post relocation motion planning is not feasible"
                         )
                         continue
+                    post_relocation_plan, node_post_relocate_plan = ret
+                assert isinstance(node_post_relocate_plan, VisNode)
 
                 for pregrasp_cand_pose in self._sample_possible_pre_grasp_pose(
                     obstacle_remove_here, obstacles
                 ):
                     # 3. post-relocate final-pregrasp reachability check
+                    node_mp_pregrasp_b = VisNode(color="red")
+                    node_post_relocate_plan.add_child(node_mp_pregrasp_b)
+
                     self.reloc_stage_history.append((depth, RelocationPlanningStage.MP_PREGRASP_B))
                     description_tweak = description.copy()
                     description_tweak[:4] = pregrasp_cand_pose
@@ -280,6 +307,9 @@ class TampSolverBase:
                         continue
 
                     # 3.1. post-relocate final-grasp check
+                    node_ik_grasp_b = VisNode()
+                    node_mp_pregrasp_b.add_child(node_ik_grasp_b)
+
                     self.reloc_stage_history.append((depth, RelocationPlanningStage.IK_GRASP_B))
                     q_grasp = self.solve_grasp_plan(
                         solution_gohome_reversed._points[-1], obstacles_remain
@@ -289,6 +319,9 @@ class TampSolverBase:
                         continue
 
                     # 4. check relocation plan is feasible
+                    node_mp_relocate = VisNode(color="orange")
+                    node_ik_grasp_b.add_child(node_mp_relocate)
+
                     self.reloc_stage_history.append((depth, RelocationPlanningStage.MP_RELOCATE))
                     solution_relocation = self.solve_relocation_plan(
                         obstacle_remove_here, obstacles_remain, reloc_plan.q_grasp, q_grasp
@@ -305,7 +338,12 @@ class TampSolverBase:
 
                     assert isinstance(post_relocation_plan, list)
                     subproblem_solution = post_relocation_plan + [reloc_plan]
-                    return subproblem_solution
+
+                    if depth == 0:
+                        node_final = VisNode(name="success", color="green")
+                        node_mp_relocate.add_child(node_final)  # final!
+
+                    return subproblem_solution, node_mp_relocate
         return None
 
     def _sample_possible_pre_grasp_pose(
@@ -566,8 +604,9 @@ if __name__ == "__main__":
     np_seed = 0
     np.random.seed(np_seed)
     set_random_seed(0)
-    tamp_problem = problem_single_object_blocking()
-    # tamp_problem = problem_single_object_blocking_hard()
+    # tamp_problem = problem_single_object_blocking()
+    tamp_problem = problem_single_object_blocking_hard()
+    tamp_problem = problem_single_object_blocking_hard2()
     tamp_problem = problem_double_object2_blocking()
     task_param = tamp_problem.to_param()
 
@@ -587,14 +626,10 @@ if __name__ == "__main__":
     import pickle
 
     print(f"length of solution: {len(ret)}")
-
-    # print history
-    for stage in solver.reloc_stage_history:
-        depth, stage = stage
-        print(f"{depth} {stage.name}")
-
     hash_value = hashlib.sha256(pickle.dumps(ret)).hexdigest()
     print(f"hash_value: {hash_value}")
+
+    visualize_tree("tree", solver.root_node)
 
     debug = False
     if debug:
