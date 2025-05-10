@@ -36,11 +36,7 @@ from skrobot.models import PR2
 from skrobot.viewers import PyrenderViewer
 
 from fd2025.planner.inference import FeasibilityCheckerBatchImageJit
-from fd2025.planner.problem_set import (
-    problem_double_object2_blocking,
-    problem_single_object_blocking_hard,
-    problem_single_object_blocking_hard2,
-)
+from fd2025.planner.problem_set import problem_double_object2_blocking
 from fd2025.planner.treevis import VisNode, visualize_tree
 
 
@@ -179,9 +175,13 @@ class TampSolverBase:
             is_est_feasible = self.is_feasible(obstacles_remain, task.description)
             if is_est_feasible:
                 obstacles_remove = [obstacles[i]]
-                return self._plan_obstacle_relocation(
+                ret = self._plan_obstacle_relocation(
                     task.description, obstacles_remove, obstacles_remain, 0, self.root_node
-                )[0]
+                )
+                if ret is not None:
+                    return ret[0]
+                else:
+                    return None
 
         # consider removing two obstacles (use heuristic that)
         for remove_pair in combinations(range(len(obstacles)), 2):
@@ -190,9 +190,13 @@ class TampSolverBase:
             is_est_feasible = self.is_feasible(obstacles_remain, task.description)
             if is_est_feasible:
                 obstacles_remove = [obstacles[i] for i in remove_pair]
-                return self._plan_obstacle_relocation(
+                ret = self._plan_obstacle_relocation(
                     task.description, obstacles_remove, obstacles_remain, 0, self.root_node
-                )[0]
+                )
+                if ret is not None:
+                    return ret[0]
+                else:
+                    return None
 
         # FIXME: currently, we do not consider removing more than two obstacles
         # TODO: consider removing arbitrary number of obstacles
@@ -602,17 +606,17 @@ class TampSolverNaive(TampSolverBase):
 
 if __name__ == "__main__":
     np_seed = 0
-    np.random.seed(np_seed)
+    # np.random.seed(np_seed)
     set_random_seed(0)
     # tamp_problem = problem_single_object_blocking()
-    tamp_problem = problem_single_object_blocking_hard()
-    tamp_problem = problem_single_object_blocking_hard2()
+    # tamp_problem = problem_single_object_blocking_hard()
+    # tamp_problem = problem_single_object_blocking_hard2()
     tamp_problem = problem_double_object2_blocking()
     task_param = tamp_problem.to_param()
 
     task = JskFridgeReachingTask.from_task_param(task_param)
-    solver = TampSolverCoverLib()
-    # solver = TampSolverNaive(timeout=0.3)
+    # solver = TampSolverCoverLib()
+    solver = TampSolverNaive(timeout=1.0)
 
     from pyinstrument import Profiler
 
