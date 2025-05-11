@@ -12,7 +12,7 @@ from hifuku.domain import JSKFridge
 from hifuku.script_utils import load_library
 from plainmp.constraint import SphereAttachmentSpec
 from plainmp.ik import solve_ik
-from plainmp.ompl_solver import OMPLSolver, OMPLSolverConfig, set_random_seed
+from plainmp.ompl_solver import OMPLSolver, OMPLSolverConfig
 from plainmp.problem import Problem
 from plainmp.psdf import CylinderSDF, Pose
 from plainmp.robot_spec import PR2LarmSpec
@@ -29,6 +29,8 @@ from rpbench.articulated.world.jskfridge import get_fridge_model, get_fridge_mod
 from rpbench.articulated.world.utils import CylinderSkelton
 from skrobot.coordinates import Coordinates, rpy_angle
 from skrobot.model.robot_model import RobotModel
+from skrobot.models import PR2
+from skrobot.viewers import PyrenderViewer
 
 from fd2025.planner.inference import FeasibilityCheckerBatchImageJit
 from fd2025.planner.problem_set import problem_single_object_blocking
@@ -143,9 +145,11 @@ class SharedContext:
         pr2_spec = PR2LarmSpec(use_fixed_uuid=False)
         pr2 = pr2_spec.get_robot_model(deepcopy=False)
         pr2.angle_vector(AV_INIT)
+        base_co = Coordinates([base_pose[0], base_pose[1], 0.0])
+        base_co.rotate(base_pose[2], "z")
+        pr2.newcoords(base_co)
         pr2_spec.reflect_kin_to_skrobot_model(pr2)
         self.pr2_spec = pr2_spec
-        self.pr2 = pr2
         self.planner = CoverlibMotionPlanner()
         self.relocation_order = relocation_order
         self.base_pose = base_pose
@@ -173,6 +177,8 @@ class SharedContext:
         pose_cst = self.pr2_spec.create_gripper_pose_const(pose_goal)
         lb, ub = self.pr2_spec.angle_bounds()
         ret = solve_ik(pose_cst, None, lb, ub, q_seed=q_now, max_trial=1)
+        print("[WARNING] set sdf please!!!")
+
         if ret.success:
             return ret.q
         return None
@@ -185,6 +191,7 @@ class SharedContext:
         q_goal: np.ndarray,
     ) -> Optional[Trajectory]:
         # compute gripper coords
+
         model = self.pr2_spec.get_robot_model(deepcopy=False)
         self.pr2_spec.set_skrobot_model_state(model, q_start)
         co_gripper_start = model.l_gripper_tool_frame.copy_worldcoords()
@@ -209,6 +216,8 @@ class SharedContext:
         # setup problem
         coll_cst = self.pr2_spec.create_collision_const(attachements=(attachement,))
         coll_cst.set_sdf(sdf)
+        assert coll_cst.is_valid(q_start)
+        assert coll_cst.is_valid(q_goal)
         lb, ub = self.pr2_spec.angle_bounds()
 
         # confine the search space
@@ -238,11 +247,15 @@ class Node(ABC):
     _generator: Optional[Generator] = None
     parent: Optional[Tuple[Action, "Node"]] = None
 
+    @property
+    def is_open(self) -> bool:
+        return self._generator is not None
+
     def __post_init__(self):
         self._generator = self._get_action_gen()
 
     def extend(self) -> Optional["Node"]:
-        assert self._generator is not None, "This node is already invalidated."
+        assert self._generator is not None
         try:
             ret = next(self._generator)
             if ret is None:
@@ -296,6 +309,7 @@ class Node(ABC):
                     yield np.hstack([co_cand.worldpos(), yaw])
         # << DEPEND ON rpbench JSKFridgeTaskBase.sample_pose() method!!
         # ============================================================
+        return None
 
 
 @dataclass
@@ -312,13 +326,22 @@ class RelocateAndHome(Action):
 
 
 @dataclass
+class FinalReach(Action):
+    path_to_reach: Trajectory
+
+
+@dataclass
 class BeforeGraspNode(Node):
     def _get_action_gen(self) -> Generator[Tuple[Action, Node], None, None]:
         get_fridge_model().regions[1].box
         pre_grasp_pose_gen = self._get_pre_grasp_pose_gen()
 
         for _ in range(20):
-            pre_grasp_pose = next(pre_grasp_pose_gen)
+            try:
+                pre_grasp_pose = next(pre_grasp_pose_gen)
+            except StopIteration:
+                self._generator = None
+                return None
             if pre_grasp_pose is None:
                 # do not consider it as a failure
                 continue
@@ -343,7 +366,7 @@ class BeforeGraspNode(Node):
                 copy.deepcopy(self.obstacles),
             )
             yield action, next_node
-        return
+        return None
 
     def _get_pre_grasp_pose_gen(self) -> Generator[Optional[np.ndarray], None, None]:
         obstacle_idx = len(self.shared_context.relocation_order) - self.remaining_relocations
@@ -389,7 +412,21 @@ class BeforeRelocationNode(Node):
                 continue
 
             # 3. solve relocation
-            # TODO: implement the relocation
+            # obstacle_idx = len(self.shared_context.relocation_order) - self.remaining_relocations
+            # obstacle_pick = self.obstacles[obstacle_idx]
+            # obstacles_other = [o for i, o in enumerate(obstacles_new) if i != obstacle_idx]
+            # assert not np.allclose(self.q, Q_INIT)
+            # solution = self.shared_context.solve_relocation_plan(
+            #     obstacle_pick,
+            #     obstacles_other,
+            #     self.q,
+            #     q_grasp,
+            # )
+            # if solution is None:
+            #     self.failure_count += 1
+            #     print("solve relocation failed")
+            #     yield None
+            #     continue
 
             if self.remaining_relocations == 1:
                 node_type = BeforeFinalReachNode
@@ -483,13 +520,26 @@ class BeforeRelocationNode(Node):
 
 class BeforeFinalReachNode(Node):
     def _get_action_gen(self) -> Generator[Optional[Tuple[Action, "Node"]], None, None]:
-        # just solve the final reach. No more sampling
-        ...
+        description = np.hstack(
+            [self.shared_context.final_target_pose, self.shared_context.base_pose]
+        )
+        solution = self.shared_context.planner.solve_motion_plan(self.obstacles, description)
+        if solution is None:
+            yield None
+            return  # close the generator
+        q_final = solution.numpy()[-1]
+        yield FinalReach(solution), GoalNode(self.shared_context, 0, q_final, self.obstacles)
+        return None  # close the generator
+
+
+class GoalNode(Node):
+    def _get_action_gen(self) -> Generator[Optional[Tuple[Action, "Node"]], None, None]:
+        yield None
 
 
 if __name__ == "__main__":
     np_seed = 0
-    set_random_seed(0)
+    # set_random_seed(0)
     tamp_problem = problem_single_object_blocking()
     task_param = tamp_problem.to_param()
     task = JskFridgeReachingTask.from_task_param(task_param)
@@ -504,18 +554,39 @@ if __name__ == "__main__":
     profiler.start()
 
     nodes = [node_init]
-    for _ in range(1000):
+    goal = None
+    for i in range(1000):
+        print(f"iteration {i}")
         node_types = [n.__class__ for n in nodes]
-        print(node_types)
-        node_idx_rand = np.random.randint(len(nodes))
-        node = nodes[node_idx_rand]
+        failure_counts = [n.failure_count for n in nodes]
+
+        # select a node randomly that is open
+        open_nodes = [n for n in nodes if n.is_open]
+        node = np.random.choice(open_nodes)
+        print(node)
         child = node.extend()
         if child is None:
             continue
         nodes.append(child)
-        if isinstance(child, BeforeFinalReachNode):
+        if isinstance(child, GoalNode):
             print("found a solution")
+            goal = child
             break
 
     profiler.stop()
     print(profiler.output_text(unicode=True, color=True, show_all=False))
+
+    # visualize goal
+    v = PyrenderViewer()
+    task.world.visualize(v)
+    pr2 = PR2()
+    base_pose = task.description[-3:]
+    pr2.translate(np.hstack([base_pose[:2], 0.0]))
+    pr2.rotate(base_pose[2], "z")
+    pr2.angle_vector(AV_INIT)
+    context.pr2_spec.set_skrobot_model_state(pr2, goal.parent[1].parent[1].q)
+    v.add(pr2)
+    v.show()
+    import time
+
+    time.sleep(1000)
