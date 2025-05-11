@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 warnings.filterwarnings("ignore")
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Generator, List, Optional, Tuple
 
 import numpy as np
@@ -235,22 +235,21 @@ class Node(ABC):
     obstacles: List[CylinderSkelton]
     failure_count: int = 0
 
-    # children nodes
     _generator: Optional[Generator] = None
-    children: List[Tuple[Action, "Node"]] = field(default_factory=list)
+    parent: Optional[Tuple[Action, "Node"]] = None
 
     def __post_init__(self):
         self._generator = self._get_action_gen()
 
-    def extend(self) -> Optional[Tuple[Action, "Node"]]:
+    def extend(self) -> Optional["Node"]:
         assert self._generator is not None, "This node is already invalidated."
         try:
             ret = next(self._generator)
             if ret is None:
                 return None
             action, next_node = ret
-            self.children.append((action, next_node))
-            return action, next_node
+            next_node.parent = (action, self)
+            return next_node
         except StopIteration:
             self._generator = None
             return None
@@ -393,9 +392,9 @@ class BeforeRelocationNode(Node):
             # TODO: implement the relocation
 
             if self.remaining_relocations == 1:
-                node_type = BeforeGraspNode
-            else:
                 node_type = BeforeFinalReachNode
+            else:
+                node_type = BeforeRelocationNode
 
             node_new = node_type(
                 self.shared_context,
@@ -497,19 +496,26 @@ if __name__ == "__main__":
     base_pose = task.description[4:]
     final_target_pose = task.description[:4]
     context = SharedContext([0], base_pose, final_target_pose)
-    # node = BeforeGraspNode(context, 1, Q_INIT, copy.deepcopy(task.world.get_obstacle_list()))
-    node = BeforeGraspNode(context, 1, Q_INIT, copy.deepcopy(task.world.get_obstacle_list()))
+    node_init = BeforeGraspNode(context, 1, Q_INIT, copy.deepcopy(task.world.get_obstacle_list()))
 
-    for i in range(10):
-        print(f"iter {i}")
-        ret = node.extend()
-        if ret is not None:
+    from pyinstrument import Profiler
+
+    profiler = Profiler()
+    profiler.start()
+
+    nodes = [node_init]
+    for _ in range(1000):
+        node_types = [n.__class__ for n in nodes]
+        print(node_types)
+        node_idx_rand = np.random.randint(len(nodes))
+        node = nodes[node_idx_rand]
+        child = node.extend()
+        if child is None:
+            continue
+        nodes.append(child)
+        if isinstance(child, BeforeFinalReachNode):
+            print("found a solution")
             break
-    action, next_node = ret
-    for j in range(1000):
-        print(f"iter {j}")
-        ret = next_node.extend()
-        if ret is not None:
-            break
-    action, next_node = ret
-    print(next_node)
+
+    profiler.stop()
+    print(profiler.output_text(unicode=True, color=True, show_all=False))
