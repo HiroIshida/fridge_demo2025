@@ -216,7 +216,10 @@ class SharedContext:
         coll_cst = self.pr2_spec.create_collision_const(attachements=(attachement,))
         coll_cst.set_sdf(sdf)
         assert coll_cst.is_valid(q_start)
-        assert coll_cst.is_valid(q_goal)
+        if not coll_cst.is_valid(q_goal):
+            # NOTE: this sometimes happens, because collision between attachment against
+            # other is not cheked in the previous IK step
+            return None
         lb, ub = self.pr2_spec.angle_bounds()
 
         # confine the search space
@@ -451,9 +454,7 @@ class BeforeRelocationNode(Node):
         obstacle_idx = len(self.shared_context.relocation_order) - self.remaining_relocations
         obstacle_pick = self.obstacles[obstacle_idx]
         obstacles_remove_later = self.obstacles[obstacle_idx + 1 :]
-        obstacles_remain = [
-            o for i, o in enumerate(self.obstacles) if i not in self.shared_context.relocation_order
-        ]
+        obstacles_remain = [o for i, o in enumerate(self.obstacles) if i != obstacle_idx]
 
         n_budget = 1000
         region_box = get_fridge_model().regions[1].box
@@ -492,7 +493,11 @@ class BeforeRelocationNode(Node):
             # NOTE: obstacles_to_check for confirming that at least with this rellocation
             # except for future relocation, the target pose is valid.
             # So obstacles_remove_later is not included in the check.
-            obstacles_to_check = [obstacle_pick_new] + obstacles_remain
+            obstacles_to_check = [
+                o
+                for i, o in enumerate(obstacles_fixed)
+                if i not in self.shared_context.relocation_order
+            ]
             if not is_valid_target_pose(
                 co_final_reach_target, obstacles_to_check, is_grasping=False
             ):
@@ -500,7 +505,7 @@ class BeforeRelocationNode(Node):
                 yield None
                 continue
 
-            obstacles_new = [obstacle_pick_new] + obstacles_remove_later + obstacles_remain
+            obstacles_new = [obstacle_pick_new] + obstacles_remain
             assert len(obstacles_new) == len(self.obstacles)
 
             # maybe creating gen here is not efficient, but for now
@@ -508,16 +513,13 @@ class BeforeRelocationNode(Node):
             try:
                 pre_grasp_pose = next(gen)
             except StopIteration:
-                print("pre-grasp pose generator failed")
                 yield None
                 continue
             if pre_grasp_pose is None:
-                print("found a valid pre-grasp pose")
                 yield None
                 continue
             yield (copy.deepcopy(obstacles_new), pre_grasp_pose)
 
-        assert False, "fuakc"
         return None
 
 
