@@ -1,5 +1,8 @@
+import time
 import warnings
 from abc import ABC, abstractmethod
+
+from plainmp.ompl_solver import OMPLSolver, OMPLSolverConfig, set_random_seed
 
 warnings.filterwarnings("ignore")
 
@@ -143,12 +146,14 @@ class SharedContext:
         final_target_pose: np.ndarray,
     ):
         pr2_spec = PR2LarmSpec(use_fixed_uuid=False)
-        pr2 = pr2_spec.get_robot_model(deepcopy=False)
+        pr2 = pr2_spec.get_robot_model(deepcopy=True, with_mesh=True)
         pr2.angle_vector(AV_INIT)
+
         base_co = Coordinates([base_pose[0], base_pose[1], 0.0])
         base_co.rotate(base_pose[2], "z")
-        pr2.newcoords(base_co)
-        pr2_spec.reflect_kin_to_skrobot_model(pr2)
+        pr2.newcoords(base_co)  # This must come after reflect_kin_to_skrobot_model!!!
+        pr2_spec.reflect_skrobot_model_to_kin(pr2)
+        self.pr2 = pr2
         self.pr2_spec = pr2_spec
         self.planner = CoverlibMotionPlanner()
         self.relocation_order = relocation_order
@@ -159,12 +164,9 @@ class SharedContext:
     def solve_grasp_plan(
         self, q_now: np.ndarray, obstacles_remain: List[CylinderSkelton]
     ) -> Optional[np.ndarray]:
-        # remove taget cylinder from the collision obstacls and check if the reach toward the
-        # grasp position is feasible
-        model = self.pr2_spec.get_robot_model(deepcopy=False)
-        self.pr2_spec.set_skrobot_model_state(model, q_now)
-        self.pr2_spec.reflect_skrobot_model_to_kin(model)
-        co = model.l_gripper_tool_frame.copy_worldcoords()
+        self.pr2_spec.set_skrobot_model_state(self.pr2, q_now)
+        self.pr2_spec.reflect_skrobot_model_to_kin(self.pr2)
+        co = self.pr2.l_gripper_tool_frame.copy_worldcoords()
         co.translate([CYLINDER_PREGRASP_OFFSET, 0.0, 0.0])
 
         sdf = get_fridge_model_sdf()
@@ -176,8 +178,7 @@ class SharedContext:
         pose_goal = np.hstack([co.worldpos(), 0.0, 0.0, yaw])
         pose_cst = self.pr2_spec.create_gripper_pose_const(pose_goal)
         lb, ub = self.pr2_spec.angle_bounds()
-        ret = solve_ik(pose_cst, None, lb, ub, q_seed=q_now, max_trial=1)
-        print("[WARNING] set sdf please!!!")
+        ret = solve_ik(pose_cst, coll_cst, lb, ub, q_seed=q_now, max_trial=1)
 
         if ret.success:
             return ret.q
@@ -190,11 +191,9 @@ class SharedContext:
         q_start: np.ndarray,
         q_goal: np.ndarray,
     ) -> Optional[Trajectory]:
-        # compute gripper coords
 
-        model = self.pr2_spec.get_robot_model(deepcopy=False)
-        self.pr2_spec.set_skrobot_model_state(model, q_start)
-        co_gripper_start = model.l_gripper_tool_frame.copy_worldcoords()
+        self.pr2_spec.set_skrobot_model_state(self.pr2, q_start)
+        co_gripper_start = self.pr2.l_gripper_tool_frame.copy_worldcoords()
         assert isinstance(co_gripper_start, Coordinates)
 
         # compute cylinder attachment
@@ -320,8 +319,8 @@ class ReachAndGrasp(Action):
 
 @dataclass
 class RelocateAndHome(Action):
-    # path_to_relocate: Trajectory
-    q_grasp: np.ndarray
+    path_relocate: Trajectory
+    q_pregrasp: np.ndarray
     path_to_home: Trajectory
 
 
@@ -352,8 +351,12 @@ class BeforeGraspNode(Node):
                 self.failure_count += 1
                 yield None
                 continue
+
+            obstacle_idx = len(self.shared_context.relocation_order) - self.remaining_relocations
+            obstacles_remain = [o for i, o in enumerate(self.obstacles) if i != obstacle_idx]
+
             q_pregrasp = solution.numpy()[-1]
-            q_grasp = self.shared_context.solve_grasp_plan(q_pregrasp, self.obstacles)
+            q_grasp = self.shared_context.solve_grasp_plan(q_pregrasp, obstacles_remain)
             if q_grasp is None:
                 self.failure_count += 1
                 yield None
@@ -402,31 +405,32 @@ class BeforeRelocationNode(Node):
             traj_to_go_home = Trajectory(solution.numpy()[::-1])
 
             # 2. solve IK
+            obstacle_idx = len(self.shared_context.relocation_order) - self.remaining_relocations
+            obstacles_remain = [o for i, o in enumerate(obstacles_new) if i != obstacle_idx]
             q_pregrasp = solution.numpy()[-1]
-            q_grasp = self.shared_context.solve_grasp_plan(q_pregrasp, obstacles_new)
+            q_grasp = self.shared_context.solve_grasp_plan(q_pregrasp, obstacles_remain)
             if q_grasp is None:
                 self.failure_count += 1
-
                 print("solve ik failed")
                 yield None
                 continue
 
             # 3. solve relocation
-            # obstacle_idx = len(self.shared_context.relocation_order) - self.remaining_relocations
-            # obstacle_pick = self.obstacles[obstacle_idx]
-            # obstacles_other = [o for i, o in enumerate(obstacles_new) if i != obstacle_idx]
-            # assert not np.allclose(self.q, Q_INIT)
-            # solution = self.shared_context.solve_relocation_plan(
-            #     obstacle_pick,
-            #     obstacles_other,
-            #     self.q,
-            #     q_grasp,
-            # )
-            # if solution is None:
-            #     self.failure_count += 1
-            #     print("solve relocation failed")
-            #     yield None
-            #     continue
+            obstacle_idx = len(self.shared_context.relocation_order) - self.remaining_relocations
+            obstacle_pick = self.obstacles[obstacle_idx]
+            obstacles_other = [o for i, o in enumerate(obstacles_new) if i != obstacle_idx]
+            assert not np.allclose(self.q, Q_INIT)
+            solution = self.shared_context.solve_relocation_plan(
+                obstacle_pick,
+                obstacles_other,
+                self.q,
+                q_grasp,
+            )
+            if solution is None:
+                self.failure_count += 1
+                print("solve relocation failed")
+                yield None
+                continue
 
             if self.remaining_relocations == 1:
                 node_type = BeforeFinalReachNode
@@ -439,7 +443,7 @@ class BeforeRelocationNode(Node):
                 Q_INIT,  # assuming that go back to the initial pose
                 obstacles_new,
             )
-            yield RelocateAndHome(q_grasp, traj_to_go_home), node_new
+            yield RelocateAndHome(solution, q_pregrasp, traj_to_go_home), node_new
 
     def _get_reloc_gen(
         self,
@@ -473,7 +477,6 @@ class BeforeRelocationNode(Node):
         co_final_reach_target = Coordinates(self.shared_context.final_target_pose[:3])
         co_final_reach_target.rotate(self.shared_context.final_target_pose[3], "z")
 
-        print(f"total {len(pos2d_cands)} candidates")
         for i, pos2d in enumerate(pos2d_cands):
             if other_obstacles_pos.size > 0:
                 distances = np.linalg.norm(other_obstacles_pos - pos2d, axis=1)
@@ -539,7 +542,8 @@ class GoalNode(Node):
 
 if __name__ == "__main__":
     np_seed = 0
-    # set_random_seed(0)
+    # np.random.seed(3)
+    set_random_seed(0)
     tamp_problem = problem_single_object_blocking()
     task_param = tamp_problem.to_param()
     task = JskFridgeReachingTask.from_task_param(task_param)
@@ -563,7 +567,6 @@ if __name__ == "__main__":
         # select a node randomly that is open
         open_nodes = [n for n in nodes if n.is_open]
         node = np.random.choice(open_nodes)
-        print(node)
         child = node.extend()
         if child is None:
             continue
@@ -573,20 +576,64 @@ if __name__ == "__main__":
             goal = child
             break
 
+    # backtrack
+    assert goal is not None
+    reverse_actions = []
+    node = goal
+    while True:
+        if node.parent is None:
+            break
+        action, parent_node = node.parent
+        reverse_actions.append(action)
+        node = parent_node
+    actions = reverse_actions[::-1]
+
     profiler.stop()
     print(profiler.output_text(unicode=True, color=True, show_all=False))
 
     # visualize goal
     v = PyrenderViewer()
     task.world.visualize(v)
-    pr2 = PR2()
+    pr2 = PR2(use_tight_joint_limit=False)
     base_pose = task.description[-3:]
     pr2.translate(np.hstack([base_pose[:2], 0.0]))
     pr2.rotate(base_pose[2], "z")
     pr2.angle_vector(AV_INIT)
-    context.pr2_spec.set_skrobot_model_state(pr2, goal.parent[1].parent[1].q)
     v.add(pr2)
     v.show()
-    import time
 
-    time.sleep(1000)
+    input("press enter to continue")
+    for action in actions:
+        if isinstance(action, ReachAndGrasp):
+            for q in action.path_to_pre_grasp.resample(100):
+                context.pr2_spec.set_skrobot_model_state(pr2, q)
+                time.sleep(0.01)
+                v.redraw()
+            input("press enter to continue")
+            context.pr2_spec.set_skrobot_model_state(pr2, action.q_grasp)
+            v.redraw()
+            input("press enter to continue")
+
+        if isinstance(action, RelocateAndHome):
+            for q in action.path_relocate.resample(100):
+                context.pr2_spec.set_skrobot_model_state(pr2, q)
+                time.sleep(0.01)
+                v.redraw()
+            input("press enter to continue")
+
+            context.pr2_spec.set_skrobot_model_state(pr2, action.q_pregrasp)
+            v.redraw()
+            input("press enter to continue")
+
+            for q in action.path_to_home.resample(100):
+                context.pr2_spec.set_skrobot_model_state(pr2, q)
+                time.sleep(0.01)
+                v.redraw()
+            input("press enter to continue")
+
+        if isinstance(action, FinalReach):
+            for q in action.path_to_reach.resample(100):
+                context.pr2_spec.set_skrobot_model_state(pr2, q)
+                time.sleep(0.01)
+                v.redraw()
+            input("press enter to continue")
