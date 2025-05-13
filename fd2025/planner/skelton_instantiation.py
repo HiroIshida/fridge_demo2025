@@ -36,7 +36,7 @@ from skrobot.models import PR2
 from skrobot.viewers import PyrenderViewer
 
 from fd2025.planner.inference import FeasibilityCheckerBatchImageJit
-from fd2025.planner.problem_set import problem_single_object_blocking
+from fd2025.planner.problem_set import problem_triple_object_blocking
 
 # globals
 CYLINDER_PREGRASP_OFFSET = 0.06
@@ -575,13 +575,14 @@ if __name__ == "__main__":
     np_seed = 0
     # np.random.seed(3)
     set_random_seed(0)
-    tamp_problem = problem_single_object_blocking()
+    # tamp_problem = problem_single_object_blocking()
+    tamp_problem = problem_triple_object_blocking()
     task_param = tamp_problem.to_param()
     task = JskFridgeReachingTask.from_task_param(task_param)
     base_pose = task.description[4:]
     final_target_pose = task.description[:4]
-    context = SharedContext([0], base_pose, final_target_pose)
-    node_init = BeforeGraspNode(context, 1, Q_INIT, copy.deepcopy(task.world.get_obstacle_list()))
+    context = SharedContext([0, 1, 2], base_pose, final_target_pose)
+    node_init = BeforeGraspNode(context, 3, Q_INIT, copy.deepcopy(task.world.get_obstacle_list()))
 
     from pyinstrument import Profiler
 

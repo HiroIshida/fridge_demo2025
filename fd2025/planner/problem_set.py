@@ -72,8 +72,23 @@ def problem_double_object2_blocking() -> TampProblem:
     return TampProblem(detection, co)
 
 
+def problem_triple_object_blocking() -> TampProblem:
+    fridge_param = np.array([0.55971283, 0.30126796, 0.42723835, 2.35101264])
+    cylinder1 = CylinderSkelton(0.0260, 0.1111)
+    cylinder1.translate([0.81, 0.34389666, 1.04915313])
+    cylidner2 = CylinderSkelton(0.026, 0.116)
+    cylidner2.translate([0.75, 0.41384931, 1.0517442])
+    cylinder3 = CylinderSkelton(0.0260, 0.1111)
+    cylinder3.translate([0.86, 0.38389666, 1.04915313])
+    cylinders = [cylinder1, cylidner2, cylinder3]
+    detection = FridgeEnvDetection(fridge_param, cylinders)
+    co = Coordinates()
+    co.translate([0.33, -0.03, 1.05])
+    return TampProblem(detection, co)
+
+
 if __name__ == "__main__":
-    problem = problem_double_object2_blocking()
+    problem = problem_triple_object_blocking()
     task = JskFridgeReachingTask.from_task_param(problem.to_param())
     v = PyrenderViewer()
     task.world.visualize(v)
