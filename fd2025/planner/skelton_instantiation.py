@@ -162,7 +162,7 @@ class SharedContext:
         larm_reach_clf.set_base_pose(base_pose)
 
     def solve_grasp_plan(
-        self, q_now: np.ndarray, obstacles_remain: List[CylinderSkelton]
+        self, q_now: np.ndarray, obstacles_fixed: List[CylinderSkelton]
     ) -> Optional[np.ndarray]:
         self.pr2_spec.set_skrobot_model_state(self.pr2, q_now)
         self.pr2_spec.reflect_skrobot_model_to_kin(self.pr2)
@@ -170,7 +170,7 @@ class SharedContext:
         co.translate([CYLINDER_PREGRASP_OFFSET, 0.0, 0.0])
 
         sdf = get_fridge_model_sdf()
-        for i, obstacle in enumerate(obstacles_remain):
+        for i, obstacle in enumerate(obstacles_fixed):
             sdf.add(CylinderSDF(obstacle.radius, obstacle.height, Pose(obstacle.worldpos())))
         coll_cst = self.pr2_spec.create_collision_const()
         coll_cst.set_sdf(sdf)
@@ -186,8 +186,8 @@ class SharedContext:
 
     def solve_relocation_plan(
         self,
-        obstacle_remove,
-        obstacles_remain: List[CylinderSkelton],
+        obstacle_relocate,
+        obstacles_fixed: List[CylinderSkelton],
         q_start: np.ndarray,
         q_goal: np.ndarray,
     ) -> Optional[Trajectory]:
@@ -197,19 +197,20 @@ class SharedContext:
         assert isinstance(co_gripper_start, Coordinates)
 
         # compute cylinder attachment
-        cylinder_pos = obstacle_remove.worldpos()
+        cylinder_pos = obstacle_relocate.worldpos()
         relative_pos = co_gripper_start.inverse_transform_vector(cylinder_pos)
         offset = 0.025  # assuming that robot slightly lifted it up
         relative_pos[2] += offset
         pts = (
-            create_cylinder_points(obstacle_remove.height, obstacle_remove.radius, 8) + relative_pos
+            create_cylinder_points(obstacle_relocate.height, obstacle_relocate.radius, 8)
+            + relative_pos
         )
         radii = np.ones(pts.shape[0]) * 0.005
         attachement = SphereAttachmentSpec("l_gripper_tool_frame", pts.T, radii, False)
 
         # setup sdf
         sdf = get_fridge_model_sdf()
-        for i, obstacle in enumerate(obstacles_remain):
+        for i, obstacle in enumerate(obstacles_fixed):
             sdf.add(CylinderSDF(obstacle.radius, obstacle.height, Pose(obstacle.worldpos())))
 
         # setup problem
@@ -275,7 +276,7 @@ class Node(ABC):
 
     @staticmethod
     def _sample_possible_pre_grasp_pose(
-        obstacle_remove: CylinderSkelton, obstacles: List[CylinderSkelton]
+        obstacle_relocate: CylinderSkelton, obstacles: List[CylinderSkelton]
     ) -> Generator[Optional[np.ndarray], None, None]:
         # ============================================================
         # >> DEPEND ON rpbench JSKFridgeTaskBase.sample_pose() method!!
@@ -290,8 +291,8 @@ class Node(ABC):
         ub = center + 0.5 * width_effective
         z = 1.07  # the value is fixed for task (check by actually sample task!)
 
-        co_baseline = obstacle_remove.copy_worldcoords()
-        z_offset = z - obstacle_remove.worldpos()[2]
+        co_baseline = obstacle_relocate.copy_worldcoords()
+        z_offset = z - obstacle_relocate.worldpos()[2]
         co_baseline.translate([0.0, 0.0, z_offset])
         n_max_iter = 10
         for _ in range(n_max_iter):
@@ -356,10 +357,10 @@ class BeforeGraspNode(Node):
                 continue
 
             obstacle_idx = len(self.shared_context.relocation_order) - self.remaining_relocations
-            obstacles_remain = [o for i, o in enumerate(self.obstacles) if i != obstacle_idx]
+            obstacles_fixed = [o for i, o in enumerate(self.obstacles) if i != obstacle_idx]
 
             q_pregrasp = solution.numpy()[-1]
-            q_grasp = self.shared_context.solve_grasp_plan(q_pregrasp, obstacles_remain)
+            q_grasp = self.shared_context.solve_grasp_plan(q_pregrasp, obstacles_fixed)
             if q_grasp is None:
                 self.failure_count += 1
                 yield None
@@ -376,8 +377,8 @@ class BeforeGraspNode(Node):
 
     def _get_pre_grasp_pose_gen(self) -> Generator[Optional[np.ndarray], None, None]:
         obstacle_idx = len(self.shared_context.relocation_order) - self.remaining_relocations
-        obstacle_remove = self.obstacles[obstacle_idx]
-        return self._sample_possible_pre_grasp_pose(obstacle_remove, self.obstacles)
+        obstacle_relocate = self.obstacles[obstacle_idx]
+        return self._sample_possible_pre_grasp_pose(obstacle_relocate, self.obstacles)
 
 
 class BeforeRelocationNode(Node):
@@ -409,9 +410,9 @@ class BeforeRelocationNode(Node):
 
             # 2. solve IK
             obstacle_idx = len(self.shared_context.relocation_order) - self.remaining_relocations
-            obstacles_remain = [o for i, o in enumerate(obstacles_new) if i != obstacle_idx]
+            obstacles_fixed = [o for i, o in enumerate(obstacles_new) if i != obstacle_idx]
             q_pregrasp = solution.numpy()[-1]
-            q_grasp = self.shared_context.solve_grasp_plan(q_pregrasp, obstacles_remain)
+            q_grasp = self.shared_context.solve_grasp_plan(q_pregrasp, obstacles_fixed)
             if q_grasp is None:
                 self.failure_count += 1
                 print("solve ik failed")
@@ -420,11 +421,11 @@ class BeforeRelocationNode(Node):
 
             # 3. solve relocation
             obstacle_idx = len(self.shared_context.relocation_order) - self.remaining_relocations
-            obstacle_pick = self.obstacles[obstacle_idx]
+            obstacle_relocate = self.obstacles[obstacle_idx]
             obstacles_other = [o for i, o in enumerate(obstacles_new) if i != obstacle_idx]
             assert not np.allclose(self.q, Q_INIT)
             solution = self.shared_context.solve_relocation_plan(
-                obstacle_pick,
+                obstacle_relocate,
                 obstacles_other,
                 self.q,
                 q_grasp,
@@ -452,25 +453,25 @@ class BeforeRelocationNode(Node):
         self,
     ) -> Generator[Optional[Tuple[List[CylinderSkelton], np.ndarray]], None, None]:
         obstacle_idx = len(self.shared_context.relocation_order) - self.remaining_relocations
-        obstacle_pick = self.obstacles[obstacle_idx]
-        obstacles_remove_later = self.obstacles[obstacle_idx + 1 :]
-        obstacles_remain = [o for i, o in enumerate(self.obstacles) if i != obstacle_idx]
+        obstacle_relocate = self.obstacles[obstacle_idx]
+        obstacles_relocate_later = self.obstacles[obstacle_idx + 1 :]
+        obstacles_fixed = [o for i, o in enumerate(self.obstacles) if i != obstacle_idx]
 
         n_budget = 1000
         region_box = get_fridge_model().regions[1].box
 
         center2d = region_box.worldpos()[:2]
-        radius = obstacle_pick.radius
+        radius = obstacle_relocate.radius
         lb = center2d - 0.5 * region_box.extents[:2] + radius
         ub = center2d + 0.5 * region_box.extents[:2] - radius
 
         # NOTE: obstacles_fixed for checking collision between rellocation target and other
-        obstacles_fixed = obstacles_remove_later + obstacles_remain
+        obstacles_fixed = obstacles_relocate_later + obstacles_fixed
         other_obstacles_pos = np.array([obs.worldpos()[:2] for obs in obstacles_fixed])
         other_obstacles_radius = np.array([obs.radius for obs in obstacles_fixed])
-        pos2d_original = obstacle_pick.worldpos()[:2]
+        pos2d_original = obstacle_relocate.worldpos()[:2]
         pos2d_cands = np.random.uniform(lb, ub, (n_budget, 2))
-        z = obstacle_pick.worldpos()[2]
+        z = obstacle_relocate.worldpos()[2]
         dists_from_original = np.linalg.norm(pos2d_cands - pos2d_original, axis=1)
         # sorted_indices = np.argsort(dists_from_original)
         # pos2d_cands = pos2d_cands[sorted_indices]
@@ -487,12 +488,12 @@ class BeforeRelocationNode(Node):
                     continue
 
             new_obs_co = Coordinates(np.hstack([pos2d, z]))
-            obstacle_pick_new = copy.deepcopy(obstacle_pick)  # do we really need deepcopy?
-            obstacle_pick_new.newcoords(new_obs_co)
+            obstacle_relocate_new = copy.deepcopy(obstacle_relocate)  # do we really need deepcopy?
+            obstacle_relocate_new.newcoords(new_obs_co)
 
             # NOTE: obstacles_to_check for confirming that at least with this rellocation
             # except for future relocation, the target pose is valid.
-            # So obstacles_remove_later is not included in the check.
+            # So obstacles_relocate_later is not included in the check.
             obstacles_to_check = [
                 o
                 for i, o in enumerate(obstacles_fixed)
@@ -505,11 +506,11 @@ class BeforeRelocationNode(Node):
                 yield None
                 continue
 
-            obstacles_new = [obstacle_pick_new] + obstacles_remain
+            obstacles_new = [obstacle_relocate_new] + obstacles_fixed
             assert len(obstacles_new) == len(self.obstacles)
 
             # maybe creating gen here is not efficient, but for now
-            gen = self._sample_possible_pre_grasp_pose(obstacle_pick_new, obstacles_new)
+            gen = self._sample_possible_pre_grasp_pose(obstacle_relocate_new, obstacles_new)
             try:
                 pre_grasp_pose = next(gen)
             except StopIteration:
