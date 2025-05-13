@@ -515,14 +515,17 @@ class BeforeRelocationNode(Node):
             new_obs_co = Coordinates(np.hstack([pos2d, z]))
             obstacle_relocate_new = copy.deepcopy(obstacle_relocate)  # do we really need deepcopy?
             obstacle_relocate_new.newcoords(new_obs_co)
+            obstacles_new = copy.deepcopy(self.obstacles)  # TODO: inefficient
+            obstacles_new[self.get_relocate_idx()] = obstacle_relocate_new
 
             # NOTE: obstacles_to_check for confirming that at least with this rellocation
             # except for future relocation, the target pose is valid.
             # So obstacles_relocate_later is not included in the check.
+            future_relocate_indices = self.shared_context.relocation_order[
+                -self.remaining_relocations + 1 :
+            ]
             obstacles_to_check = [
-                o
-                for i, o in enumerate(obstacles_fixed)
-                if i not in self.shared_context.relocation_order
+                o for i, o in enumerate(obstacles_new) if i not in future_relocate_indices
             ]
             if not is_valid_target_pose(
                 co_final_reach_target, obstacles_to_check, is_grasping=False
@@ -530,9 +533,6 @@ class BeforeRelocationNode(Node):
                 print("target pose is not valid")
                 yield None
                 continue
-
-            obstacles_new = [obstacle_relocate_new] + obstacles_fixed
-            assert len(obstacles_new) == len(self.obstacles)
 
             # maybe creating gen here is not efficient, but for now
             gen = self._sample_possible_pre_grasp_pose(obstacle_relocate_new, obstacles_new)
