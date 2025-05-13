@@ -579,6 +579,25 @@ class GoalNode(Node):
         yield None
 
 
+_shared_context_cache = {}
+
+
+def build_shared_context(
+    relocation_order: Tuple[int, ...],
+    base_pose: np.ndarray,
+    final_target_pose: np.ndarray,
+    use_coverlib: bool = True,
+) -> SharedContext:
+    key = (tuple(relocation_order), tuple(base_pose), tuple(final_target_pose), use_coverlib)
+    if key in _shared_context_cache:
+        return _shared_context_cache[key]
+    context = SharedContext(
+        relocation_order, base_pose, final_target_pose, use_coverlib=use_coverlib
+    )
+    _shared_context_cache[key] = context
+    return context
+
+
 def instantiate_skelton(
     obstacles: List[CylinderSkelton],
     base_pose: np.ndarray,
@@ -589,7 +608,7 @@ def instantiate_skelton(
     use_coverlib: bool = True,
 ) -> Optional[Tuple[Tuple[Action, ...], Node, Node]]:  # solution, initial node, goal node
 
-    context = SharedContext(
+    context = build_shared_context(
         relocation_order, base_pose, final_target_pose, use_coverlib=use_coverlib
     )
     remaining_relocations = len(relocation_order)
@@ -642,6 +661,7 @@ if __name__ == "__main__":
     task = JskFridgeReachingTask.from_task_param(task_param)
     base_pose = task.description[4:]
     final_target_pose = task.description[:4]
+    build_shared_context((0, 1, 2), base_pose, final_target_pose, use_coverlib=True)  # to cache
     from pyinstrument import Profiler
 
     profiler = Profiler()
