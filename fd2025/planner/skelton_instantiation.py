@@ -170,7 +170,7 @@ class SharedContext:
         co.translate([CYLINDER_PREGRASP_OFFSET, 0.0, 0.0])
 
         sdf = get_fridge_model_sdf()
-        for i, obstacle in enumerate(obstacles_fixed):
+        for obstacle in obstacles_fixed:
             sdf.add(CylinderSDF(obstacle.radius, obstacle.height, Pose(obstacle.worldpos())))
         coll_cst = self.pr2_spec.create_collision_const()
         coll_cst.set_sdf(sdf)
@@ -210,7 +210,7 @@ class SharedContext:
 
         # setup sdf
         sdf = get_fridge_model_sdf()
-        for i, obstacle in enumerate(obstacles_fixed):
+        for obstacle in obstacles_fixed:
             sdf.add(CylinderSDF(obstacle.radius, obstacle.height, Pose(obstacle.worldpos())))
 
         # setup problem
@@ -253,6 +253,10 @@ class Node(ABC):
     @property
     def is_open(self) -> bool:
         return self._generator is not None
+
+    def get_relocate_idx(self) -> int:
+        tmp = len(self.shared_context.relocation_order) - self.remaining_relocations
+        return self.shared_context.relocation_order[tmp]
 
     def __post_init__(self):
         self._generator = self._get_action_gen()
@@ -356,9 +360,9 @@ class BeforeGraspNode(Node):
                 yield None
                 continue
 
-            obstacle_idx = len(self.shared_context.relocation_order) - self.remaining_relocations
-            obstacles_fixed = [o for i, o in enumerate(self.obstacles) if i != obstacle_idx]
-
+            obstacles_fixed = [
+                o for i, o in enumerate(self.obstacles) if i != self.get_relocate_idx()
+            ]
             q_pregrasp = solution.numpy()[-1]
             q_grasp = self.shared_context.solve_grasp_plan(q_pregrasp, obstacles_fixed)
             if q_grasp is None:
@@ -409,8 +413,9 @@ class BeforeRelocationNode(Node):
             traj_to_go_home = Trajectory(solution.numpy()[::-1])
 
             # 2. solve IK
-            obstacle_idx = len(self.shared_context.relocation_order) - self.remaining_relocations
-            obstacles_fixed = [o for i, o in enumerate(obstacles_new) if i != obstacle_idx]
+            obstacles_fixed = [
+                o for i, o in enumerate(obstacles_new) if i != self.get_relocate_idx()
+            ]
             q_pregrasp = solution.numpy()[-1]
             q_grasp = self.shared_context.solve_grasp_plan(q_pregrasp, obstacles_fixed)
             if q_grasp is None:
@@ -420,13 +425,11 @@ class BeforeRelocationNode(Node):
                 continue
 
             # 3. solve relocation
-            obstacle_idx = len(self.shared_context.relocation_order) - self.remaining_relocations
-            obstacle_relocate = self.obstacles[obstacle_idx]
-            obstacles_other = [o for i, o in enumerate(obstacles_new) if i != obstacle_idx]
+            obstacle_relocate = self.obstacles[self.get_relocate_idx()]
             assert not np.allclose(self.q, Q_INIT)
             solution = self.shared_context.solve_relocation_plan(
                 obstacle_relocate,
-                obstacles_other,
+                obstacles_fixed,
                 self.q,
                 q_grasp,
             )
@@ -452,10 +455,9 @@ class BeforeRelocationNode(Node):
     def _get_reloc_gen(
         self,
     ) -> Generator[Optional[Tuple[List[CylinderSkelton], np.ndarray]], None, None]:
-        obstacle_idx = len(self.shared_context.relocation_order) - self.remaining_relocations
-        obstacle_relocate = self.obstacles[obstacle_idx]
-        obstacles_relocate_later = self.obstacles[obstacle_idx + 1 :]
-        obstacles_fixed = [o for i, o in enumerate(self.obstacles) if i != obstacle_idx]
+        obstacle_relocate = self.obstacles[self.get_relocate_idx()]
+        obstacles_relocate_later = self.obstacles[self.get_relocate_idx() + 1 :]
+        obstacles_fixed = [o for i, o in enumerate(self.obstacles) if i != self.get_relocate_idx()]
 
         n_budget = 1000
         region_box = get_fridge_model().regions[1].box
@@ -466,7 +468,6 @@ class BeforeRelocationNode(Node):
         ub = center2d + 0.5 * region_box.extents[:2] - radius
 
         # NOTE: obstacles_fixed for checking collision between rellocation target and other
-        obstacles_fixed = obstacles_relocate_later + obstacles_fixed
         other_obstacles_pos = np.array([obs.worldpos()[:2] for obs in obstacles_fixed])
         other_obstacles_radius = np.array([obs.radius for obs in obstacles_fixed])
         pos2d_original = obstacle_relocate.worldpos()[:2]
