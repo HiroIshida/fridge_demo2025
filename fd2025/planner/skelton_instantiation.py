@@ -466,7 +466,7 @@ class BeforeRelocationNode(Node):
             if self.remaining_relocations == 1:
                 node_type = BeforeFinalReachNode
             else:
-                node_type = BeforeRelocationNode
+                node_type = BeforeGraspNode
 
             node_new = node_type(
                 self.shared_context,
