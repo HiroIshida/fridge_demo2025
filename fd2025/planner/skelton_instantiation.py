@@ -242,7 +242,12 @@ class SharedContext:
         # setup problem
         coll_cst = self.pr2_spec.create_collision_const(attachements=(attachement,))
         coll_cst.set_sdf(sdf)
-        assert coll_cst.is_valid(q_start)
+
+        if not coll_cst.is_valid(q_start):
+            # NOTE: this should not happen, but just unfortunately sometimes happens
+            # I'll return None for now
+            return None
+
         if not coll_cst.is_valid(q_goal):
             # NOTE: this sometimes happens, because collision between attachment against
             # other is not cheked in the previous IK step
@@ -459,7 +464,6 @@ class BeforeRelocationNode(Node):
             )
             if solution is None:
                 self.failure_count += 1
-                print("solve relocation failed")
                 yield None
                 continue
 
@@ -530,7 +534,6 @@ class BeforeRelocationNode(Node):
             if not is_valid_target_pose(
                 co_final_reach_target, obstacles_to_check, is_grasping=False
             ):
-                print("target pose is not valid")
                 yield None
                 continue
 
