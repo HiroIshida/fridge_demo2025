@@ -276,10 +276,14 @@ class Node(ABC):
     remaining_relocations: int
     q: np.ndarray  # configuration
     obstacles: List[CylinderSkelton]
+    depth: int = 0
     failure_count: int = 0
-
     _generator: Optional[Generator] = None
     parent: Optional[Tuple[Action, "Node"]] = None
+
+    def update_failure_count(self):
+        self.failure_count += 1
+        # TODO: propagate the failure count to parent node??
 
     @property
     def is_open(self) -> bool:
@@ -387,7 +391,7 @@ class BeforeGraspNode(Node):
             description = np.hstack([pre_grasp_pose, self.shared_context.base_pose])
             solution = self.shared_context.planner.solve_motion_plan(self.obstacles, description)
             if solution is None:
-                self.failure_count += 1
+                self.update_failure_count()
                 yield None
                 continue
 
@@ -397,7 +401,7 @@ class BeforeGraspNode(Node):
             q_pregrasp = solution.numpy()[-1]
             q_grasp = self.shared_context.solve_grasp_plan(q_pregrasp, obstacles_fixed)
             if q_grasp is None:
-                self.failure_count += 1
+                self.update_failure_count()
                 yield None
                 continue
             action = ReachAndGrasp(solution, q_grasp)
@@ -406,6 +410,7 @@ class BeforeGraspNode(Node):
                 self.remaining_relocations,
                 q_grasp,
                 copy.deepcopy(self.obstacles),
+                self.depth + 1,
             )
             yield action, next_node
         return None
@@ -437,7 +442,7 @@ class BeforeRelocationNode(Node):
             description = np.hstack([pre_grasp_pose, self.shared_context.base_pose])
             solution = self.shared_context.planner.solve_motion_plan(obstacles_new, description)
             if solution is None:
-                self.failure_count += 1
+                self.update_failure_count()
                 yield None
                 continue
             traj_to_go_home = Trajectory(solution.numpy()[::-1])
@@ -449,7 +454,7 @@ class BeforeRelocationNode(Node):
             q_pregrasp = solution.numpy()[-1]
             q_grasp = self.shared_context.solve_grasp_plan(q_pregrasp, obstacles_fixed)
             if q_grasp is None:
-                self.failure_count += 1
+                self.update_failure_count()
                 yield None
                 continue
 
@@ -463,7 +468,7 @@ class BeforeRelocationNode(Node):
                 q_grasp,
             )
             if solution is None:
-                self.failure_count += 1
+                self.update_failure_count()
                 yield None
                 continue
 
@@ -477,6 +482,7 @@ class BeforeRelocationNode(Node):
                 self.remaining_relocations - 1,
                 Q_INIT,  # assuming that go back to the initial pose
                 obstacles_new,
+                self.depth + 1,
             )
             yield RelocateAndHome(solution, q_pregrasp, traj_to_go_home), node_new
 
@@ -594,11 +600,17 @@ if __name__ == "__main__":
     for i in range(1000):
         print(f"iteration {i}")
         node_types = [n.__class__ for n in nodes]
-        failure_counts = [n.failure_count for n in nodes]
-
-        # select a node randomly that is open
         open_nodes = [n for n in nodes if n.is_open]
-        node = np.random.choice(open_nodes)
+        do_exploit = np.random.uniform() < 0.25
+        if do_exploit:
+            depth_list = [n.depth for n in open_nodes]
+            max_depth = max(depth_list)
+            max_depth_nodes = [n for n in open_nodes if n.depth == max_depth]
+            best_failure_count = min([n.failure_count for n in max_depth_nodes])
+            best_nodes = [n for n in max_depth_nodes if n.failure_count == best_failure_count]
+            node = np.random.choice(best_nodes)
+        else:
+            node = np.random.choice(open_nodes)
         child = node.extend()
         if child is None:
             continue
