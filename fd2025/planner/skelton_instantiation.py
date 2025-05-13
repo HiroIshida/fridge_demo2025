@@ -131,6 +131,28 @@ class CoverlibMotionPlanner(MotionPlanerBase):
         return ret.traj
 
 
+class NaiveMotionPlanner(MotionPlanerBase):
+    def __init__(self, timeout: float = 0.5):
+        super().__init__()
+        conf = OMPLSolverConfig(timeout=timeout)
+        self._mp_solver = OMPLSolver(conf)
+        self._region_box = get_fridge_model().regions[1].box
+
+    def is_feasible(self, obstacles: List[CylinderSkelton], description: np.ndarray) -> bool:
+        traj = self.solve_motion_plan(obstacles, description)
+        return traj is not None
+
+    def solve_motion_plan(
+        self, obstacles: List[CylinderSkelton], description: np.ndarray
+    ) -> Optional[Trajectory]:
+        obstacles_param = self.obstacles_to_obstacles_param(obstacles, self._region_box)
+        world = JskFridgeReachingTask.get_world_type()(obstacles_param[: len(obstacles) * 4])
+        task = JskFridgeReachingTask(world, description)
+        problem = task.export_problem()
+        ret = self._mp_solver.solve(problem)
+        return ret.traj
+
+
 class SharedContext:
     pr2_spec: PR2LarmSpec
     pr2: RobotModel
@@ -144,6 +166,7 @@ class SharedContext:
         relocation_order: Tuple[int, ...],
         base_pose: np.ndarray,
         final_target_pose: np.ndarray,
+        use_coverlib: bool = True,
     ):
         pr2_spec = PR2LarmSpec(use_fixed_uuid=False)
         pr2 = pr2_spec.get_robot_model(deepcopy=True, with_mesh=True)
@@ -155,7 +178,10 @@ class SharedContext:
         pr2_spec.reflect_skrobot_model_to_kin(pr2)
         self.pr2 = pr2
         self.pr2_spec = pr2_spec
-        self.planner = CoverlibMotionPlanner()
+        if use_coverlib:
+            self.planner = CoverlibMotionPlanner()
+        else:
+            self.planner = NaiveMotionPlanner(timeout=0.3)
         self.relocation_order = relocation_order
         self.base_pose = base_pose
         self.final_target_pose = final_target_pose
@@ -229,7 +255,7 @@ class SharedContext:
 
         resolution = np.ones(7) * 0.03
         problem = Problem(q_start, q_min, q_max, q_goal, coll_cst, None, resolution)
-        solver_config = OMPLSolverConfig(algorithm_range=0.1, shortcut=True, timeout=0.05)
+        solver_config = OMPLSolverConfig(algorithm_range=0.1, shortcut=True, timeout=0.03)
         solver = OMPLSolver(solver_config)
         ret = solver.solve(problem)
         return ret.traj
@@ -406,7 +432,6 @@ class BeforeRelocationNode(Node):
             description = np.hstack([pre_grasp_pose, self.shared_context.base_pose])
             solution = self.shared_context.planner.solve_motion_plan(obstacles_new, description)
             if solution is None:
-                print("motion plan failed")
                 self.failure_count += 1
                 yield None
                 continue
@@ -420,7 +445,6 @@ class BeforeRelocationNode(Node):
             q_grasp = self.shared_context.solve_grasp_plan(q_pregrasp, obstacles_fixed)
             if q_grasp is None:
                 self.failure_count += 1
-                print("solve ik failed")
                 yield None
                 continue
 
