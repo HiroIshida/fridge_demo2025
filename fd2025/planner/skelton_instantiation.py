@@ -2,7 +2,7 @@ import time
 import warnings
 from abc import ABC, abstractmethod
 
-from plainmp.ompl_solver import OMPLSolver, OMPLSolverConfig, set_random_seed
+from plainmp.ompl_solver import OMPLSolver, OMPLSolverConfig
 
 warnings.filterwarnings("ignore")
 
@@ -240,7 +240,9 @@ class SharedContext:
             sdf.add(CylinderSDF(obstacle.radius, obstacle.height, Pose(obstacle.worldpos())))
 
         # setup problem
-        coll_cst = self.pr2_spec.create_collision_const(attachements=(attachement,))
+        coll_cst = self.pr2_spec.create_collision_const(
+            attachements=(attachement,), reorder_spheres=False
+        )
         coll_cst.set_sdf(sdf)
 
         if not coll_cst.is_valid(q_start):
@@ -577,31 +579,27 @@ class GoalNode(Node):
         yield None
 
 
-if __name__ == "__main__":
-    np_seed = 0
-    # np.random.seed(3)
-    set_random_seed(0)
-    # tamp_problem = problem_single_object_blocking()
-    tamp_problem = problem_triple_object_blocking()
-    task_param = tamp_problem.to_param()
-    task = JskFridgeReachingTask.from_task_param(task_param)
-    base_pose = task.description[4:]
-    final_target_pose = task.description[:4]
-    context = SharedContext([0, 1, 2], base_pose, final_target_pose)
-    node_init = BeforeGraspNode(context, 3, Q_INIT, copy.deepcopy(task.world.get_obstacle_list()))
+def instantiate_skelton(
+    obstacles: List[CylinderSkelton],
+    base_pose: np.ndarray,
+    final_target_pose: np.ndarray,
+    relocation_order: Tuple[int, ...],
+    p_exploit: float = 0.5,
+    max_iter: int = 1000,
+    use_coverlib: bool = True,
+) -> Optional[Tuple[Tuple[Action, ...], Node, Node]]:  # solution, initial node, goal node
 
-    from pyinstrument import Profiler
-
-    profiler = Profiler()
-    profiler.start()
+    context = SharedContext(
+        relocation_order, base_pose, final_target_pose, use_coverlib=use_coverlib
+    )
+    remaining_relocations = len(relocation_order)
+    node_init = BeforeGraspNode(context, remaining_relocations, Q_INIT, obstacles)
 
     nodes = [node_init]
     goal = None
-    for i in range(1000):
-        print(f"iteration {i}")
-        node_types = [n.__class__ for n in nodes]
+    for i in range(max_iter):
         open_nodes = [n for n in nodes if n.is_open]
-        do_exploit = np.random.uniform() < 0.25
+        do_exploit = np.random.uniform() < p_exploit
         if do_exploit:
             depth_list = [n.depth for n in open_nodes]
             max_depth = max(depth_list)
@@ -620,8 +618,9 @@ if __name__ == "__main__":
             goal = child
             break
 
-    # backtrack
-    assert goal is not None
+    if goal is None:
+        return None
+
     reverse_actions = []
     node = goal
     while True:
@@ -631,7 +630,28 @@ if __name__ == "__main__":
         reverse_actions.append(action)
         node = parent_node
     actions = reverse_actions[::-1]
+    return actions, node_init, goal
 
+
+if __name__ == "__main__":
+    np_seed = 0
+    np.random.seed(3)
+    # set_random_seed(0)
+    tamp_problem = problem_triple_object_blocking()
+    task_param = tamp_problem.to_param()
+    task = JskFridgeReachingTask.from_task_param(task_param)
+    base_pose = task.description[4:]
+    final_target_pose = task.description[:4]
+    from pyinstrument import Profiler
+
+    profiler = Profiler()
+    profiler.start()
+    actions, node_init, node_goal = instantiate_skelton(
+        task.world.get_obstacle_list(),
+        base_pose,
+        final_target_pose,
+        relocation_order=(0, 1, 2),
+    )
     profiler.stop()
     print(profiler.output_text(unicode=True, color=True, show_all=False))
 
@@ -645,39 +665,40 @@ if __name__ == "__main__":
     pr2.angle_vector(AV_INIT)
     v.add(pr2)
     v.show()
+    pr2_spec = PR2LarmSpec(use_fixed_uuid=False)
 
     input("press enter to continue")
     for action in actions:
         if isinstance(action, ReachAndGrasp):
             for q in action.path_to_pre_grasp.resample(100):
-                context.pr2_spec.set_skrobot_model_state(pr2, q)
+                pr2_spec.set_skrobot_model_state(pr2, q)
                 time.sleep(0.01)
                 v.redraw()
             input("press enter to continue")
-            context.pr2_spec.set_skrobot_model_state(pr2, action.q_grasp)
+            pr2_spec.set_skrobot_model_state(pr2, action.q_grasp)
             v.redraw()
             input("press enter to continue")
 
         if isinstance(action, RelocateAndHome):
             for q in action.path_relocate.resample(100):
-                context.pr2_spec.set_skrobot_model_state(pr2, q)
+                pr2_spec.set_skrobot_model_state(pr2, q)
                 time.sleep(0.01)
                 v.redraw()
             input("press enter to continue")
 
-            context.pr2_spec.set_skrobot_model_state(pr2, action.q_pregrasp)
+            pr2_spec.set_skrobot_model_state(pr2, action.q_pregrasp)
             v.redraw()
             input("press enter to continue")
 
             for q in action.path_to_home.resample(100):
-                context.pr2_spec.set_skrobot_model_state(pr2, q)
+                pr2_spec.set_skrobot_model_state(pr2, q)
                 time.sleep(0.01)
                 v.redraw()
             input("press enter to continue")
 
         if isinstance(action, FinalReach):
             for q in action.path_to_reach.resample(100):
-                context.pr2_spec.set_skrobot_model_state(pr2, q)
+                pr2_spec.set_skrobot_model_state(pr2, q)
                 time.sleep(0.01)
                 v.redraw()
             input("press enter to continue")
