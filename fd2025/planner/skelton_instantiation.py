@@ -3,6 +3,7 @@ import warnings
 from abc import ABC, abstractmethod
 from enum import Enum
 
+import graphviz
 from plainmp.ompl_solver import OMPLSolver, OMPLSolverConfig
 
 warnings.filterwarnings("ignore")
@@ -623,7 +624,9 @@ def instantiate_skelton(
     p_exploit: float = 0.5,
     max_iter: int = 1000,
     use_coverlib: bool = True,
-) -> Optional[Tuple[Tuple[Action, ...], Node, Node]]:  # solution, initial node, goal node
+) -> Optional[
+    Tuple[Tuple[Action, ...], Node, Node, List[Node]]
+]:  # solution, initial node, goal node, nodes
 
     context = build_shared_context(
         relocation_order, base_pose, final_target_pose, use_coverlib=use_coverlib
@@ -634,6 +637,7 @@ def instantiate_skelton(
     nodes = [node_init]
     goal = None
     for i in range(max_iter):
+        print(f"iteration: {i}")
         open_nodes = [n for n in nodes if n.is_open]
         do_exploit = np.random.uniform() < p_exploit
         if do_exploit:
@@ -666,12 +670,113 @@ def instantiate_skelton(
         reverse_actions.append(action)
         node = parent_node
     actions = reverse_actions[::-1]
-    return actions, node_init, goal
+    return actions, node_init, goal, nodes
+
+
+def visualize_search_graph(nodes, filename="search_graph", view=True):
+
+    COMP_TYPE_COLOR_MAP = {
+        "MP": "red",
+        "IK": "green",
+        "RELOC": "orange",
+    }
+
+    def get_comp_types_from_action(action) -> list:
+        if isinstance(action, ReachAndGrasp):
+            return [CompType.MP, CompType.IK]
+        elif isinstance(action, RelocateAndHome):
+            return [CompType.MP, CompType.IK, CompType.RELOC]
+        elif isinstance(action, FinalReach):
+            return [CompType.MP]
+        else:
+            return []
+
+    dot = graphviz.Digraph(name="search_graph", format="pdf")
+    dot.attr(rankdir="LR")
+    num_mp = 0
+
+    node_id_map = {}
+    for i, node in enumerate(nodes):
+        node_id_map[id(node)] = i
+
+    for node in nodes:
+        i = node_id_map[id(node)]
+        label = f"Node[{i}]"
+        dot.node(
+            f"node_{i}",
+            label=label,
+            shape="box",
+            style="filled",
+            color="lightgray",
+        )
+
+    comp_node_global_idx = 0
+    fail_node_global_idx = 0
+
+    for node in nodes:
+        start_node_id = f"node_{node_id_map[id(node)]}"
+        for comp_seq in node.failure_info_list:
+            prev_id = start_node_id
+            for comp_type in comp_seq:
+                if comp_type == CompType.MP:
+                    num_mp += 1
+
+                comp_node_id = f"comp_{comp_node_global_idx}"
+                comp_node_global_idx += 1
+                dot.node(
+                    comp_node_id,
+                    shape="circle",
+                    style="filled",
+                    fixedsize="true",
+                    width="0.4",
+                    height="0.4",
+                    label="",
+                    color=COMP_TYPE_COLOR_MAP[comp_type.name],
+                )
+                dot.edge(prev_id, comp_node_id)
+                prev_id = comp_node_id
+            fail_node_id = f"fail_{fail_node_global_idx}"
+            fail_node_global_idx += 1
+            dot.node(fail_node_id, label="", shape="diamond", color="black")
+            dot.edge(prev_id, fail_node_id)
+
+    for child in nodes:
+        if child.parent is None:
+            continue
+        action, parent_node = child.parent
+        comp_types = get_comp_types_from_action(action)
+        if not comp_types:
+            dot.edge(f"node_{node_id_map[id(parent_node)]}", f"node_{node_id_map[id(child)]}")
+            continue
+
+        prev_id = f"node_{node_id_map[id(parent_node)]}"
+        for comp_type in comp_types:
+            if comp_type == CompType.MP:
+                num_mp += 1
+            comp_node_id = f"comp_{comp_node_global_idx}"
+            comp_node_global_idx += 1
+            dot.node(
+                comp_node_id,
+                shape="circle",
+                style="filled",
+                color=COMP_TYPE_COLOR_MAP[comp_type.name],
+                fixedsize="true",
+                width="0.4",
+                height="0.4",
+                label="",
+            )
+            dot.edge(prev_id, comp_node_id)
+            prev_id = comp_node_id
+        dot.edge(prev_id, f"node_{node_id_map[id(child)]}")
+
+    dot.render(filename, view=view)
+    print(f"num_mp: {num_mp}")
+    return dot
 
 
 if __name__ == "__main__":
     np_seed = 0
-    np.random.seed(3)
+    # np.random.seed(5)
     # set_random_seed(0)
     tamp_problem = problem_triple_object_blocking()
     task_param = tamp_problem.to_param()
@@ -683,7 +788,7 @@ if __name__ == "__main__":
 
     profiler = Profiler()
     profiler.start()
-    actions, node_init, node_goal = instantiate_skelton(
+    actions, node_init, node_goal, nodes = instantiate_skelton(
         task.world.get_obstacle_list(),
         base_pose,
         final_target_pose,
@@ -691,6 +796,8 @@ if __name__ == "__main__":
     )
     profiler.stop()
     print(profiler.output_text(unicode=True, color=True, show_all=False))
+
+    visualize_search_graph(nodes, "search_graph", view=True)
 
     # visualize goal
     v = PyrenderViewer()
