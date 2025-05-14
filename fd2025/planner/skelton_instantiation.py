@@ -1,14 +1,15 @@
 import time
 import warnings
 from abc import ABC, abstractmethod
+from enum import Enum
 
 from plainmp.ompl_solver import OMPLSolver, OMPLSolverConfig
 
 warnings.filterwarnings("ignore")
 
 import copy
-from dataclasses import dataclass
-from typing import Generator, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Generator, List, Optional, Tuple
 
 import numpy as np
 from hifuku.domain import JSKFridge
@@ -272,6 +273,12 @@ class Action:
     ...
 
 
+class CompType(Enum):
+    MP = 0
+    IK = 1
+    RELOC = 2
+
+
 @dataclass
 class Node(ABC):
     shared_context: SharedContext
@@ -282,8 +289,10 @@ class Node(ABC):
     failure_count: int = 0
     _generator: Optional[Generator] = None
     parent: Optional[Tuple[Action, "Node"]] = None
+    failure_info_list: List[List[CompType]] = field(default_factory=list)
 
-    def update_failure_count(self):
+    def recored_failure(self, failure_info: Any):  # shoud I rename it?
+        self.failure_info_list.append(failure_info)
         self.failure_count += 1
         # TODO: propagate the failure count to parent node??
 
@@ -390,10 +399,13 @@ class BeforeGraspNode(Node):
                 # do not consider it as a failure
                 continue
 
+            comp_history = []
+
             description = np.hstack([pre_grasp_pose, self.shared_context.base_pose])
             solution = self.shared_context.planner.solve_motion_plan(self.obstacles, description)
+            comp_history.append(CompType.MP)
             if solution is None:
-                self.update_failure_count()
+                self.recored_failure(comp_history)
                 yield None
                 continue
 
@@ -402,8 +414,9 @@ class BeforeGraspNode(Node):
             ]
             q_pregrasp = solution.numpy()[-1]
             q_grasp = self.shared_context.solve_grasp_plan(q_pregrasp, obstacles_fixed)
+            comp_history.append(CompType.IK)
             if q_grasp is None:
-                self.update_failure_count()
+                self.recored_failure(comp_history)
                 yield None
                 continue
             action = ReachAndGrasp(solution, q_grasp)
@@ -439,12 +452,14 @@ class BeforeRelocationNode(Node):
                 continue
 
             obstacles_new, pre_grasp_pose = reloc
+            comp_history = []
 
             # 1. check if relocation's pre-grasp pose is reachable
             description = np.hstack([pre_grasp_pose, self.shared_context.base_pose])
             solution = self.shared_context.planner.solve_motion_plan(obstacles_new, description)
+            comp_history.append(CompType.MP)
             if solution is None:
-                self.update_failure_count()
+                self.recored_failure(comp_history)
                 yield None
                 continue
             traj_to_go_home = Trajectory(solution.numpy()[::-1])
@@ -455,8 +470,9 @@ class BeforeRelocationNode(Node):
             ]
             q_pregrasp = solution.numpy()[-1]
             q_grasp = self.shared_context.solve_grasp_plan(q_pregrasp, obstacles_fixed)
+            comp_history.append(CompType.IK)
             if q_grasp is None:
-                self.update_failure_count()
+                self.recored_failure(comp_history)
                 yield None
                 continue
 
@@ -469,8 +485,9 @@ class BeforeRelocationNode(Node):
                 self.q,
                 q_grasp,
             )
+            comp_history.append(CompType.RELOC)
             if solution is None:
-                self.update_failure_count()
+                self.recored_failure(comp_history)
                 yield None
                 continue
 
