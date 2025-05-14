@@ -55,7 +55,7 @@ def is_valid_target_pose(
 
     # ============================================================
     # >> DEPEND ON rpbench JSKFridgeTaskBase.sample_pose() method!!
-    if sdf.evaluate(co.worldpos()) < 0.03:
+    if sdf.evaluate(co.worldpos()) < 0.02:
         return False
     co_dummy = co.copy_worldcoords()
     co_dummy.translate([-0.07, 0.0, 0.0])
@@ -339,6 +339,7 @@ class Node(ABC):
         width_effective = np.array([D - 2 * depth_margin, W - 2 * horizontal_margin])
         center = region.box.worldpos()[:2]
         lb = center - 0.5 * width_effective
+        lb[0] -= 0.05  # gripper x-pos can be smaller than object
         ub = center + 0.5 * width_effective
         z = 1.07  # the value is fixed for task (check by actually sample task!)
 
