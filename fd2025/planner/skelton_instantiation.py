@@ -644,7 +644,10 @@ def instantiate_skelton(
         relocation_order, base_pose, final_target_pose, use_coverlib=use_coverlib
     )
     remaining_relocations = len(relocation_order)
-    node_init = BeforeGraspNode(context, remaining_relocations, Q_INIT, obstacles)
+    if remaining_relocations == 0:
+        node_init = BeforeFinalReachNode(context, 0, Q_INIT, obstacles)
+    else:
+        node_init = BeforeGraspNode(context, remaining_relocations, Q_INIT, obstacles)
 
     nodes = [node_init]
     goal = None
