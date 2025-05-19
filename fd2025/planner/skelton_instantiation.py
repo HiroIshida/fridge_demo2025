@@ -690,6 +690,87 @@ def instantiate_skelton(
     return actions, node_init, goal, nodes
 
 
+def instantiate_skelton2(
+    obstacles: List[CylinderSkelton],
+    base_pose: np.ndarray,
+    final_target_pose: np.ndarray,
+    reloc_order_list: List[Tuple[int, ...]],
+    p_exploit: float = 0.5,
+    max_iter: int = 1000,
+    use_coverlib: bool = True,
+) -> Optional[Tuple[Tuple[Action, ...], Node, Node, List[Node], Tuple[int, ...]]]:
+    forest = []  # [(node_init, [node_init], relocation_order), ...]
+    all_nodes = []
+    for reloc_order in reloc_order_list:
+        context = SharedContext(
+            reloc_order,
+            base_pose,
+            final_target_pose,
+            use_coverlib=use_coverlib,
+        )
+        remaining_relocations = len(reloc_order)
+
+        if remaining_relocations == 0:
+            node_init = BeforeFinalReachNode(context, 0, Q_INIT, obstacles)
+        else:
+            node_init = BeforeGraspNode(context, remaining_relocations, Q_INIT, obstacles)
+
+        forest.append((node_init, [node_init], reloc_order))
+        all_nodes.append(node_init)
+
+    for i_iter in range(max_iter):
+        open_nodes = []
+        for (init_node, nodes, reloc_order) in forest:
+            open_nodes.extend([n for n in nodes if n.is_open])
+
+        if len(open_nodes) == 0:
+            print("No open nodes remain. All search trees are exhausted.")
+            return None
+
+        do_exploit = np.random.uniform() < p_exploit
+        if do_exploit:
+            max_depth = max(n.depth for n in open_nodes)
+            max_depth_nodes = [n for n in open_nodes if n.depth == max_depth]
+            best_failure_count = min(n.failure_count for n in max_depth_nodes)
+            candidate_nodes = [n for n in max_depth_nodes if n.failure_count == best_failure_count]
+            node = np.random.choice(candidate_nodes)
+        else:
+            node = np.random.choice(open_nodes)
+
+        child = node.extend()
+        if child is None:
+            continue
+
+        for (init_node, nodes, reloc_order) in forest:
+            if child.shared_context is node.shared_context:
+                nodes.append(child)
+                break
+        all_nodes.append(child)
+
+        if isinstance(child, GoalNode):
+            print("Found a solution!!")
+            actions = []
+            goal_node = child
+            current = goal_node
+            while current.parent is not None:
+                action, parent_node = current.parent
+                actions.append(action)
+                current = parent_node
+            actions.reverse()
+
+            used_reloc_order = child.shared_context.relocation_order
+            node_init_for_this = None
+            for (init_node, nodes, reloc_order) in forest:
+                if reloc_order == used_reloc_order:
+                    node_init_for_this = init_node
+                    break
+
+            return (tuple(actions), node_init_for_this, goal_node, all_nodes)
+
+    print("No solution found under max_iter limit.")
+    return None
+
+
 def visualize_search_graph(nodes, filename="search_graph", view=True):
 
     COMP_TYPE_COLOR_MAP = {
@@ -815,23 +896,20 @@ def solve_tamp(
                 np.hstack([final_target_pose, base_pose]),
             )
             if est_feasible:
-                for relocate_indices_perm in permutations(relocate_indices_comb):
-                    relocation_order = tuple(relocate_indices_perm)
-                    print(f"relocation_order: {relocation_order}")
-
-                    ret = instantiate_skelton(
-                        obstacles,
-                        base_pose,
-                        final_target_pose,
-                        relocation_order=relocation_order,
-                        p_exploit=p_exploit,
-                        max_iter=max_iter,
-                        use_coverlib=use_coverlib,
-                    )
-                    if ret is not None:
-                        actions, node_init, node_goal, nodes = ret
-                        return actions, node_init, node_goal, nodes
-                    print(f"failed to find a solution")
+                relocate_indices_list = list(permutations(relocate_indices_comb))
+                ret = instantiate_skelton2(
+                    obstacles,
+                    base_pose,
+                    final_target_pose,
+                    relocate_indices_list,
+                    p_exploit=p_exploit,
+                    max_iter=max_iter,
+                    use_coverlib=use_coverlib,
+                )
+                if ret is not None:
+                    actions, node_init, node_goal, nodes = ret
+                    return actions, node_init, node_goal, nodes
+                print(f"failed to find a solution")
             else:
                 print(f"estimated infeasible")
     return None
