@@ -452,8 +452,7 @@ class BeforeGraspNode(Node):
         return None
 
     def _get_pre_grasp_pose_gen(self) -> Generator[Optional[np.ndarray], None, None]:
-        obstacle_idx = len(self.shared_context.relocation_order) - self.remaining_relocations
-        obstacle_relocate = self.obstacles[obstacle_idx]
+        obstacle_relocate = self.obstacles[self.get_relocate_idx()]
         return self._sample_possible_pre_grasp_pose(obstacle_relocate, self.obstacles)
 
 
