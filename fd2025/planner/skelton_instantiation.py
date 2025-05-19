@@ -156,6 +156,14 @@ class NaiveMotionPlanner(MotionPlanerBase):
         return ret.traj
 
 
+@lru_cache(maxsize=None)
+def get_motion_planner(use_coverlib: bool, timeout: Optional[float]) -> MotionPlanerBase:
+    if use_coverlib:
+        return CoverlibMotionPlanner()
+    else:
+        return NaiveMotionPlanner(timeout=timeout)
+
+
 class SharedContext:
     pr2_spec: PR2LarmSpec
     pr2: RobotModel
@@ -170,8 +178,9 @@ class SharedContext:
         base_pose: np.ndarray,
         final_target_pose: np.ndarray,
         use_coverlib: bool = True,
+        timeout: Optional[float] = None,
     ):
-        pr2_spec = PR2LarmSpec(use_fixed_uuid=False)
+        pr2_spec = PR2LarmSpec(spec_id="rpbench-pr2-jskfridge")
         pr2 = self.get_pr2()
         pr2.angle_vector(AV_INIT)
 
@@ -181,10 +190,7 @@ class SharedContext:
         pr2_spec.reflect_skrobot_model_to_kin(pr2)
         self.pr2 = pr2
         self.pr2_spec = pr2_spec
-        if use_coverlib:
-            self.planner = self.get_coverlib_planner()
-        else:
-            self.planner = NaiveMotionPlanner(timeout=0.3)
+        self.planner = get_motion_planner(use_coverlib, timeout)
         self.relocation_order = relocation_order
         self.base_pose = base_pose
         self.final_target_pose = final_target_pose
@@ -192,13 +198,8 @@ class SharedContext:
 
     @staticmethod
     @lru_cache(maxsize=1)
-    def get_coverlib_planner() -> CoverlibMotionPlanner:
-        return CoverlibMotionPlanner()
-
-    @staticmethod
-    @lru_cache(maxsize=1)
     def get_pr2() -> RobotModel:
-        pr2_spec = PR2LarmSpec(use_fixed_uuid=False)
+        pr2_spec = PR2LarmSpec(spec_id="rpbench-pr2-jskfridge")
         pr2 = pr2_spec.get_robot_model(deepcopy=True, with_mesh=True)
         return pr2
 
@@ -615,6 +616,13 @@ class GoalNode(Node):
         yield None
 
 
+def setup_cache() -> None:
+    get_motion_planner(True, None)  # cache
+    SharedContext.get_pr2()  # cache
+    spec = PR2LarmSpec(spec_id="rpbench-pr2-jskfridge")
+    spec.get_kin()
+
+
 def instantiate_skelton(
     obstacles: List[CylinderSkelton],
     base_pose: np.ndarray,
@@ -782,9 +790,7 @@ if __name__ == "__main__":
     task = JskFridgeReachingTask.from_task_param(task_param)
     base_pose = task.description[4:]
     final_target_pose = task.description[:4]
-
-    SharedContext.get_coverlib_planner()  # cache
-    SharedContext.get_pr2()  # cache
+    setup_cache()
 
     from pyinstrument import Profiler
 
@@ -811,7 +817,7 @@ if __name__ == "__main__":
     pr2.angle_vector(AV_INIT)
     v.add(pr2)
     v.show()
-    pr2_spec = PR2LarmSpec(use_fixed_uuid=False)
+    pr2_spec = PR2LarmSpec(use_fixed_spec_id=False)
 
     input("press enter to continue")
     for action in actions:
