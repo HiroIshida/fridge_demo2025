@@ -867,7 +867,7 @@ if __name__ == "__main__":
 
     # visualize goal
     v = PyrenderViewer()
-    task.world.visualize(v)
+    obj_handle_list = task.world.visualize(v)
     pr2 = PR2(use_tight_joint_limit=False)
     base_pose = task.description[-3:]
     pr2.translate(np.hstack([base_pose[:2], 0.0]))
@@ -888,6 +888,8 @@ if __name__ == "__main__":
             pr2_spec.set_skrobot_model_state(pr2, action.q_grasp)
             v.redraw()
             input("press enter to continue")
+            obj_handle = obj_handle_list[action.obj_idx]
+            pr2.larm_end_coords.assoc(obj_handle)
 
         if isinstance(action, RelocateAndHome):
             for q in action.path_relocate.resample(100):
@@ -895,6 +897,8 @@ if __name__ == "__main__":
                 time.sleep(0.01)
                 v.redraw()
             input("press enter to continue")
+            obj_handle = obj_handle_list[action.obj_idx]
+            pr2.larm_end_coords.dissoc(obj_handle)
 
             pr2_spec.set_skrobot_model_state(pr2, action.q_pregrasp)
             v.redraw()
