@@ -2,6 +2,7 @@ import time
 import warnings
 from abc import ABC, abstractmethod
 from enum import Enum
+from functools import lru_cache
 
 import graphviz
 from plainmp.ompl_solver import OMPLSolver, OMPLSolverConfig
@@ -171,7 +172,7 @@ class SharedContext:
         use_coverlib: bool = True,
     ):
         pr2_spec = PR2LarmSpec(use_fixed_uuid=False)
-        pr2 = pr2_spec.get_robot_model(deepcopy=True, with_mesh=True)
+        pr2 = self.get_pr2()
         pr2.angle_vector(AV_INIT)
 
         base_co = Coordinates([base_pose[0], base_pose[1], 0.0])
@@ -181,13 +182,25 @@ class SharedContext:
         self.pr2 = pr2
         self.pr2_spec = pr2_spec
         if use_coverlib:
-            self.planner = CoverlibMotionPlanner()
+            self.planner = self.get_coverlib_planner()
         else:
             self.planner = NaiveMotionPlanner(timeout=0.3)
         self.relocation_order = relocation_order
         self.base_pose = base_pose
         self.final_target_pose = final_target_pose
         larm_reach_clf.set_base_pose(base_pose)
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def get_coverlib_planner() -> CoverlibMotionPlanner:
+        return CoverlibMotionPlanner()
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def get_pr2() -> RobotModel:
+        pr2_spec = PR2LarmSpec(use_fixed_uuid=False)
+        pr2 = pr2_spec.get_robot_model(deepcopy=True, with_mesh=True)
+        return pr2
 
     def solve_grasp_plan(
         self, q_now: np.ndarray, obstacles_fixed: List[CylinderSkelton]
@@ -602,25 +615,6 @@ class GoalNode(Node):
         yield None
 
 
-_shared_context_cache = {}
-
-
-def build_shared_context(
-    relocation_order: Tuple[int, ...],
-    base_pose: np.ndarray,
-    final_target_pose: np.ndarray,
-    use_coverlib: bool = True,
-) -> SharedContext:
-    key = (tuple(relocation_order), tuple(base_pose), tuple(final_target_pose), use_coverlib)
-    if key in _shared_context_cache:
-        return _shared_context_cache[key]
-    context = SharedContext(
-        relocation_order, base_pose, final_target_pose, use_coverlib=use_coverlib
-    )
-    _shared_context_cache[key] = context
-    return context
-
-
 def instantiate_skelton(
     obstacles: List[CylinderSkelton],
     base_pose: np.ndarray,
@@ -633,7 +627,7 @@ def instantiate_skelton(
     Tuple[Tuple[Action, ...], Node, Node, List[Node]]
 ]:  # solution, initial node, goal node, nodes
 
-    context = build_shared_context(
+    context = SharedContext(
         relocation_order, base_pose, final_target_pose, use_coverlib=use_coverlib
     )
     remaining_relocations = len(relocation_order)
@@ -788,7 +782,10 @@ if __name__ == "__main__":
     task = JskFridgeReachingTask.from_task_param(task_param)
     base_pose = task.description[4:]
     final_target_pose = task.description[:4]
-    build_shared_context((0, 1, 2), base_pose, final_target_pose, use_coverlib=True)  # to cache
+
+    SharedContext.get_coverlib_planner()  # cache
+    SharedContext.get_pr2()  # cache
+
     from pyinstrument import Profiler
 
     profiler = Profiler()
