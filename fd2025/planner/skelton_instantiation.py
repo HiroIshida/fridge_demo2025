@@ -350,15 +350,19 @@ class Node(ABC):
         for _ in range(n_max_iter):
             co_cand = co_baseline.copy_worldcoords()
             pos = co_cand.worldpos()
-            if np.any(pos[:2] < lb) or np.any(pos[:2] > ub):
-                yield None
-                continue
+
             yaw = np.random.uniform(-0.25 * np.pi, 0.25 * np.pi)
             co_cand.rotate(yaw, "z")
             co_cand.translate([-CYLINDER_PREGRASP_OFFSET, 0.0, 0.0])
+
+            if np.any(pos[:2] < lb) or np.any(pos[:2] > ub):
+                yield None
+                continue
+
             is_reachable = larm_reach_clf.predict(
                 co_cand
             )  # assuming that base pose is already set in solve()
+
             if is_reachable:
                 if is_valid_target_pose(co_cand, obstacles, is_grasping=False):
                     yield np.hstack([co_cand.worldpos(), yaw])
