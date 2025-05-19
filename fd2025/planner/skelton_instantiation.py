@@ -5,7 +5,7 @@ from enum import Enum
 from functools import lru_cache
 
 import graphviz
-from plainmp.ompl_solver import OMPLSolver, OMPLSolverConfig
+from plainmp.ompl_solver import OMPLSolver, OMPLSolverConfig, set_random_seed
 
 warnings.filterwarnings("ignore")
 
@@ -40,7 +40,7 @@ from skrobot.models import PR2
 from skrobot.viewers import PyrenderViewer
 
 from fd2025.planner.inference import FeasibilityCheckerBatchImageJit
-from fd2025.planner.problem_set import problem_triple_object_blocking
+from fd2025.planner.problem_set import problem_triple_object_blocking2
 
 # globals
 CYLINDER_PREGRASP_OFFSET = 0.06
@@ -621,6 +621,7 @@ def setup_cache() -> None:
     SharedContext.get_pr2()  # cache
     spec = PR2LarmSpec(spec_id="rpbench-pr2-jskfridge")
     spec.get_kin()
+    spec.get_robot_model(deepcopy=False)
 
 
 def instantiate_skelton(
@@ -644,8 +645,10 @@ def instantiate_skelton(
     nodes = [node_init]
     goal = None
     for i in range(max_iter):
-        print(f"iteration: {i}")
         open_nodes = [n for n in nodes if n.is_open]
+        if len(open_nodes) == 0:
+            print("no open nodes")
+            break
         do_exploit = np.random.uniform() < p_exploit
         if do_exploit:
             depth_list = [n.depth for n in open_nodes]
@@ -829,9 +832,11 @@ def solve_tamp(
 
 if __name__ == "__main__":
     np_seed = 0
-    # np.random.seed(5)
-    # set_random_seed(0)
-    tamp_problem = problem_triple_object_blocking()
+    np.random.seed(5)
+    set_random_seed(0)
+    tamp_problem = problem_triple_object_blocking2()
+
+    # tamp_problem = problem_triple_object_blocking()
     task_param = tamp_problem.to_param()
     task = JskFridgeReachingTask.from_task_param(task_param)
     base_pose = task.description[4:]
@@ -842,14 +847,17 @@ if __name__ == "__main__":
 
     profiler = Profiler()
     profiler.start()
-    actions, node_init, node_goal, nodes = instantiate_skelton(
+
+    ret = solve_tamp(
         task.world.get_obstacle_list(),
         base_pose,
         final_target_pose,
-        relocation_order=(0, 1, 2),
     )
+
     profiler.stop()
     print(profiler.output_text(unicode=True, color=True, show_all=False))
+
+    actions, node_init, node_goal, nodes = ret
 
     visualize_search_graph(nodes, "search_graph", view=True)
 
