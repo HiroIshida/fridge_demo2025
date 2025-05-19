@@ -632,68 +632,6 @@ def instantiate_skelton(
     obstacles: List[CylinderSkelton],
     base_pose: np.ndarray,
     final_target_pose: np.ndarray,
-    relocation_order: Tuple[int, ...],
-    p_exploit: float = 0.5,
-    max_iter: int = 1000,
-    use_coverlib: bool = True,
-) -> Optional[
-    Tuple[Tuple[Action, ...], Node, Node, List[Node]]
-]:  # solution, initial node, goal node, nodes
-
-    context = SharedContext(
-        relocation_order, base_pose, final_target_pose, use_coverlib=use_coverlib
-    )
-    remaining_relocations = len(relocation_order)
-    if remaining_relocations == 0:
-        node_init = BeforeFinalReachNode(context, 0, Q_INIT, obstacles)
-    else:
-        node_init = BeforeGraspNode(context, remaining_relocations, Q_INIT, obstacles)
-
-    nodes = [node_init]
-    goal = None
-    for i in range(max_iter):
-        open_nodes = [n for n in nodes if n.is_open]
-        if len(open_nodes) == 0:
-            print("no open nodes")
-            break
-        do_exploit = np.random.uniform() < p_exploit
-        if do_exploit:
-            depth_list = [n.depth for n in open_nodes]
-            max_depth = max(depth_list)
-            max_depth_nodes = [n for n in open_nodes if n.depth == max_depth]
-            best_failure_count = min([n.failure_count for n in max_depth_nodes])
-            best_nodes = [n for n in max_depth_nodes if n.failure_count == best_failure_count]
-            node = np.random.choice(best_nodes)
-        else:
-            node = np.random.choice(open_nodes)
-        child = node.extend()
-        if child is None:
-            continue
-        nodes.append(child)
-        if isinstance(child, GoalNode):
-            print("found a solution")
-            goal = child
-            break
-
-    if goal is None:
-        return None
-
-    reverse_actions = []
-    node = goal
-    while True:
-        if node.parent is None:
-            break
-        action, parent_node = node.parent
-        reverse_actions.append(action)
-        node = parent_node
-    actions = reverse_actions[::-1]
-    return actions, node_init, goal, nodes
-
-
-def instantiate_skelton2(
-    obstacles: List[CylinderSkelton],
-    base_pose: np.ndarray,
-    final_target_pose: np.ndarray,
     reloc_order_list: List[Tuple[int, ...]],
     p_exploit: float = 0.5,
     max_iter: int = 1000,
@@ -897,7 +835,7 @@ def solve_tamp(
             )
             if est_feasible:
                 relocate_indices_list = list(permutations(relocate_indices_comb))
-                ret = instantiate_skelton2(
+                ret = instantiate_skelton(
                     obstacles,
                     base_pose,
                     final_target_pose,
