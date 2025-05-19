@@ -11,6 +11,7 @@ warnings.filterwarnings("ignore")
 
 import copy
 from dataclasses import dataclass, field
+from itertools import combinations, permutations
 from typing import Any, Generator, List, Optional, Tuple
 
 import numpy as np
@@ -779,6 +780,52 @@ def visualize_search_graph(nodes, filename="search_graph", view=True):
     dot.render(filename, view=view)
     print(f"num_mp: {num_mp}")
     return dot
+
+
+def solve_tamp(
+    obstacles: List[CylinderSkelton],
+    base_pose: np.ndarray,
+    final_target_pose: np.ndarray,
+    p_exploit: float = 0.5,
+    max_iter: int = 1000,
+    use_coverlib: bool = True,
+    timeout: Optional[float] = None,
+) -> Optional[
+    Tuple[Tuple[Action, ...], Node, Node, List[Node]]
+]:  # solution, initial node, goal node, nodes
+
+    planner = get_motion_planner(use_coverlib, timeout)
+
+    for n_relocate in range(len(obstacles) + 1):
+        indices = np.arange(len(obstacles))
+        for relocate_indices_comb in combinations(indices, n_relocate):
+            print(f"relocate_indices_comb: {relocate_indices_comb}")
+            obstacles_hypo = [obstacles[i] for i in indices if i not in relocate_indices_comb]
+            est_feasible = planner.is_feasible(
+                obstacles_hypo,
+                np.hstack([final_target_pose, base_pose]),
+            )
+            if est_feasible:
+                for relocate_indices_perm in permutations(relocate_indices_comb):
+                    relocation_order = tuple(relocate_indices_perm)
+                    print(f"relocation_order: {relocation_order}")
+
+                    ret = instantiate_skelton(
+                        obstacles,
+                        base_pose,
+                        final_target_pose,
+                        relocation_order=relocation_order,
+                        p_exploit=p_exploit,
+                        max_iter=max_iter,
+                        use_coverlib=use_coverlib,
+                    )
+                    if ret is not None:
+                        actions, node_init, node_goal, nodes = ret
+                        return actions, node_init, node_goal, nodes
+                    print(f"failed to find a solution")
+            else:
+                print(f"estimated infeasible")
+    return None
 
 
 if __name__ == "__main__":
