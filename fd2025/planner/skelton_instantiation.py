@@ -388,12 +388,14 @@ class Node(ABC):
 
 @dataclass
 class ReachAndGrasp(Action):
+    obj_idx: int
     path_to_pre_grasp: Trajectory
     q_grasp: np.ndarray
 
 
 @dataclass
 class RelocateAndHome(Action):
+    obj_idx: int
     path_relocate: Trajectory
     q_pregrasp: np.ndarray
     path_to_home: Trajectory
@@ -440,7 +442,7 @@ class BeforeGraspNode(Node):
                 self.recored_failure(comp_history)
                 yield None
                 continue
-            action = ReachAndGrasp(solution, q_grasp)
+            action = ReachAndGrasp(self.get_relocate_idx(), solution, q_grasp)
             next_node = BeforeRelocationNode(
                 self.shared_context,
                 self.remaining_relocations,
@@ -523,7 +525,9 @@ class BeforeRelocationNode(Node):
                 obstacles_new,
                 self.depth + 1,
             )
-            yield RelocateAndHome(solution, q_pregrasp, traj_to_go_home), node_new
+            yield RelocateAndHome(
+                self.get_relocate_idx(), solution, q_pregrasp, traj_to_go_home
+            ), node_new
 
     def _get_reloc_gen(
         self,
